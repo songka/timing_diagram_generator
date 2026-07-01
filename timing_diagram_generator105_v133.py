@@ -2206,7 +2206,10 @@ class TimingDiagramApp:
                 ttk.Entry(param_frame, textvariable=var, width=14).grid(row=row, column=1, sticky=tk.W, padx=4, pady=3)
 
         def current_params() -> Dict[str, str]:
-            return {name: var.get() for name, var in param_vars.items()}
+            text_params = parse_param_text()
+            if mode_to_value() == "expression":
+                return text_params
+            return text_params or {name: var.get() for name, var in param_vars.items()}
 
         def clear_user_param_frame() -> None:
             for child in user_param_frame.winfo_children():
