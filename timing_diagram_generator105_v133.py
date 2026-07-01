@@ -812,7 +812,9 @@ def build_events_from_actions(actions: List[FlowAction], cycle_count: int = 1) -
                         raise ValueError(f"{action_error_label(action)} 等待了不存在的动作 {dep_id}。")
                     dep_action = action_by_id[dep_id]
                     if trigger_mode == "等待上一轮完成":
-                        target_effective_cycle = event["effective_cycle"] - wait_cycles
+                        # 等待轮数控制本动作隔几轮执行；真正依赖的是被等待动作的上一轮完成。
+                        # 例如本动作第 3 轮触发时，应等待被等待动作第 2 轮完成。
+                        target_effective_cycle = event["effective_cycle"] - 1
                         if target_effective_cycle < 1:
                             continue
                         dep_event = dependency_event_for_effective_cycle(
