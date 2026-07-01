@@ -54,6 +54,8 @@ S2T_PHRASES = {
     "等待设置": "等待設定",
     "第一轮": "第一輪",
     "后续轮": "後續輪",
+    "后续轮使用不同条件": "後續輪使用不同條件",
+    "同第一轮": "同第一輪",
     "触发方式": "觸發方式",
     "重复次数": "重複次數",
     "绘制轮数": "繪製輪數",
@@ -252,6 +254,7 @@ FLOW_HEADERS = [
     "后续轮等待轮数",
     "后续轮触发方式",
     "后续轮等待到",
+    "后续轮使用不同条件",
     "备注",
 ]
 
@@ -343,6 +346,7 @@ class FlowAction:
     trigger_value: int = 1
     later_trigger_mode: str = "同次完成"
     later_trigger_value: int = 1
+    use_later_rule: bool = False
     note: str = ""
 
 
@@ -601,6 +605,11 @@ def clean_text(value) -> str:
     return str(value).strip()
 
 
+def bool_from_cell(value) -> bool:
+    text = to_simplified(clean_text(value)).lower()
+    return text in {"1", "true", "yes", "y", "是", "使用", "不同", "启用", "勾选"}
+
+
 def header_map(ws) -> Dict[str, int]:
     result: Dict[str, int] = {}
     first_row = [to_simplified(clean_text(ws.cell(row=1, column=c).value)) for c in range(1, ws.max_column + 1)]
@@ -632,13 +641,40 @@ def action_effective_cycle(action: FlowAction, cycle: int, occurrence: int) -> i
     return cycle
 
 
+def action_wait_interval(action: FlowAction, use_later_rule: bool) -> int:
+    mode = action.later_trigger_mode if use_later_rule else action.trigger_mode
+    cycles = action.later_wait_cycles if use_later_rule else action.wait_cycles
+    if mode != "等待上一轮完成":
+        return 0
+    return max(1, int(cycles or 1))
+
+
+def action_first_run_cycle(action: FlowAction) -> int:
+    if split_ids(action.depends_on) and action.trigger_mode == "等待上一轮完成":
+        return max(1, int(action.wait_cycles or 1)) + 1
+    return 1
+
+
 def action_runs_in_cycle(action: FlowAction, effective_cycle: int) -> bool:
-    if effective_cycle <= 1:
+    first_cycle = action_first_run_cycle(action)
+    if effective_cycle < first_cycle:
+        return False
+    if effective_cycle == first_cycle:
         return True
-    if action.later_trigger_mode == "等待上一轮完成" and split_ids(action.later_depends_on):
-        interval = max(1, int(action.later_wait_cycles or 1))
-        return (effective_cycle - 1) % interval == 0
-    return True
+
+    use_later_rule = bool(action.use_later_rule)
+    interval = action_wait_interval(action, use_later_rule)
+    if interval <= 0:
+        interval = action_wait_interval(action, False)
+    if interval <= 0:
+        return True
+
+    # 第一轮通过“其它条件”触发时，后续“等上一轮 M 次”需要从 M+2 轮开始；
+    # 第一轮无条件或第一轮本身也是“等上一轮”时，则从首轮动作后每 M 轮触发一次。
+    offset = 1 if (use_later_rule and split_ids(action.depends_on) and action.trigger_mode != "等待上一轮完成") else 0
+    if effective_cycle < first_cycle + offset + interval:
+        return False
+    return (effective_cycle - first_cycle - offset) % interval == 0
 
 
 def dependency_event_for_effective_cycle(
@@ -745,11 +781,12 @@ def build_events_from_actions(actions: List[FlowAction], cycle_count: int = 1) -
                 event = event_by_key.get((action.action_id, cycle, occurrence))
                 if event is None:
                     continue
-                use_first_rule = event.get("effective_cycle", cycle) == 1
-                dep_ids = split_ids(action.depends_on if use_first_rule else action.later_depends_on)
-                trigger_mode = action.trigger_mode if use_first_rule else action.later_trigger_mode
-                trigger_value = action.trigger_value if use_first_rule else action.later_trigger_value
-                wait_cycles = action.wait_cycles if use_first_rule else action.later_wait_cycles
+                use_first_rule = event.get("effective_cycle", cycle) == action_first_run_cycle(action)
+                use_later_rule = bool(action.use_later_rule) and not use_first_rule
+                dep_ids = split_ids(action.later_depends_on if use_later_rule else action.depends_on)
+                trigger_mode = action.later_trigger_mode if use_later_rule else action.trigger_mode
+                trigger_value = action.later_trigger_value if use_later_rule else action.trigger_value
+                wait_cycles = action.later_wait_cycles if use_later_rule else action.wait_cycles
                 wait_cycles = max(1, int(wait_cycles or 1)) if trigger_mode == "等待上一轮完成" else 0
                 if occurrence > 1:
                     prev_event = event_by_key.get((action.action_id, cycle, occurrence - 1))
@@ -775,9 +812,11 @@ def build_events_from_actions(actions: List[FlowAction], cycle_count: int = 1) -
                         raise ValueError(f"{action_error_label(action)} 等待了不存在的动作 {dep_id}。")
                     dep_action = action_by_id[dep_id]
                     if trigger_mode == "等待上一轮完成":
-                        if event["effective_cycle"] <= wait_cycles:
-                            continue
+                        # 等待轮数控制本动作隔几轮执行；真正依赖的是被等待动作的上一轮完成。
+                        # 例如本动作第 3 轮触发时，应等待被等待动作第 2 轮完成。
                         target_effective_cycle = event["effective_cycle"] - 1
+                        if target_effective_cycle < 1:
+                            continue
                         dep_event = dependency_event_for_effective_cycle(
                             event_by_key,
                             dep_action,
@@ -803,7 +842,7 @@ def build_events_from_actions(actions: List[FlowAction], cycle_count: int = 1) -
                     if dep_effective_cycle != event["effective_cycle"]:
                         offset = event["effective_cycle"] - dep_effective_cycle
                         cycle_note = "上一轮" if offset == 1 else f"上 {offset} 轮"
-                    edge_kind = "later_wait" if cycle > 1 and action.later_depends_on else "first_wait"
+                    edge_kind = "later_wait" if use_later_rule else "first_wait"
                     add_event_dependency(
                         event,
                         dep_event,
@@ -905,6 +944,7 @@ def load_actions_from_sheet(ws) -> List[FlowAction]:
             first_trigger_value_col,
             later_trigger_mode_col,
             later_trigger_value_col,
+            positions.get("后续轮使用不同条件"),
             positions.get("备注"),
         ]
         return any(clean_text(ws.cell(row=row, column=col).value) for col in content_columns if col)
@@ -956,6 +996,11 @@ def load_actions_from_sheet(ws) -> List[FlowAction]:
                 ws.cell(row=row, column=later_trigger_value_col).value if later_trigger_value_col else "",
                 1,
             ),
+            use_later_rule=bool_from_cell(cell_value(row, "后续轮使用不同条件"))
+            or bool(clean_text(cell_value(row, "后续轮等待动作编号")))
+            or bool(clean_text(cell_value(row, "后续轮等待轮数")))
+            or bool(clean_text(cell_value(row, "后续轮触发方式")))
+            or bool(clean_text(cell_value(row, "后续轮等待到"))),
             note=clean_text(cell_value(row, "备注")),
         )
         if action.trigger_mode == "上一次完成":
@@ -966,6 +1011,11 @@ def load_actions_from_sheet(ws) -> List[FlowAction]:
             action.trigger_mode = "同次完成"
         if action.later_trigger_mode not in TRIGGER_MODES:
             action.later_trigger_mode = action.trigger_mode
+        if not action.use_later_rule:
+            action.later_depends_on = action.depends_on
+            action.later_wait_cycles = action.wait_cycles
+            action.later_trigger_mode = action.trigger_mode
+            action.later_trigger_value = action.trigger_value
         actions.append(action)
     return actions
 
@@ -1152,11 +1202,12 @@ def write_template_workbook(path: str, lang: str = "zh_cn") -> None:
         "后续轮等待轮数",
         "后续轮触发方式",
         "后续轮等待到",
+        "后续轮使用不同条件",
         "备注",
     ]
     ws.append([zh_text(header, lang) for header in headers])
     style_header(ws, len(headers))
-    autofit(ws, {1: 10, 2: 16, 3: 34, 4: 10, 5: 10, 6: 18, 7: 12, 8: 16, 9: 12, 10: 18, 11: 12, 12: 16, 13: 12, 14: 28})
+    autofit(ws, {1: 10, 2: 16, 3: 34, 4: 10, 5: 10, 6: 18, 7: 12, 8: 16, 9: 12, 10: 18, 11: 12, 12: 16, 13: 12, 14: 16, 15: 28})
     for row in range(2, 32):
         for col in range(1, len(headers) + 1):
             cell = ws.cell(row=row, column=col)
@@ -1196,7 +1247,8 @@ def write_template_workbook(path: str, lang: str = "zh_cn") -> None:
         ["第一轮等待轮数", "只有触发方式为等待上一轮完成时需要填；最小 1，1 表示上一轮，2 表示上两轮。"],
         ["第一轮触发方式", "同次完成：等对方第 1 次/第 2 次对应完成；固定次数完成：等到指定次数；等待上一轮完成：按等待轮数等历史轮次，第一轮通常不用。"],
         ["第一轮等待到", "只有触发方式为固定次数完成时需要填，例如 3 表示等对方第 3 次完成。"],
-        ["后续轮等待动作编号", "第 2 轮及以后需要用不同等待条件时填写。为空时不额外等待其它动作主体。动作编号不填时，按有效动作行顺序理解编号。"],
+        ["后续轮使用不同条件", "默认不用填写，后续轮沿用第一轮条件；只有需要不同等待条件时填“是”并填写后续轮等待列。"],
+        ["后续轮等待动作编号", "只有后续轮使用不同条件时填写。若本轮被等待的动作不执行，其它动作在本轮等待它时会自动跳过这个等待。动作编号不填时，按有效动作行顺序理解编号。"],
         ["后续轮等待轮数", "只有后续轮触发方式为等待上一轮完成时需要填；最小 1，1 表示上一轮，2 表示上两轮。"],
         ["后续轮触发方式", "后续轮的等待规则，可以和第一轮不同。"],
         ["后续轮等待到", "只有后续轮触发方式为固定次数完成时需要填。"],
@@ -1282,6 +1334,7 @@ def write_action_detail_sheet(ws, actions: List[FlowAction], events: List[dict],
             action.later_trigger_value
             if action.later_depends_on and action.later_trigger_mode == "固定次数完成"
             else "",
+            "是" if action.use_later_rule else "否",
             action.note,
         ]
         for col, value in enumerate(values, 1):
@@ -1613,6 +1666,7 @@ class TimingDiagramApp:
             "later_wait_cycles": tk.StringVar(value="1"),
             "later_trigger_mode": tk.StringVar(value="同次完成"),
             "later_trigger_value": tk.StringVar(value=TRIGGER_VALUE_LABELS[0]),
+            "use_later_rule": tk.BooleanVar(value=False),
             "note": tk.StringVar(),
         }
         self.dependency_var = tk.StringVar(value=WAIT_NONE_LABEL)
@@ -1713,8 +1767,17 @@ class TimingDiagramApp:
         ttk.Button(dep_buttons, text="移除", command=lambda: self.remove_selected_dependency("first")).pack(side=tk.LEFT, padx=1)
         ttk.Button(dep_buttons, text="清空", command=lambda: self.clear_selected_dependencies("first")).pack(side=tk.LEFT, padx=1)
 
+        self.use_later_rule_check = ttk.Checkbutton(
+            wait_frame,
+            text="后续轮使用不同条件",
+            variable=self.vars["use_later_rule"],
+            command=self.update_trigger_visibility,
+        )
+        self.use_later_rule_check.grid(row=2, column=0, columnspan=2, sticky=tk.W, padx=4, pady=(4, 0))
+
         later_frame = ttk.LabelFrame(wait_frame, text="后续轮")
-        later_frame.grid(row=2, column=0, columnspan=2, sticky=tk.EW, padx=4, pady=3)
+        self.later_rule_frame = later_frame
+        later_frame.grid(row=3, column=0, columnspan=2, sticky=tk.EW, padx=4, pady=3)
         later_frame.columnconfigure(3, weight=1)
         later_frame.rowconfigure(0, minsize=30)
         self.form_labels["later_trigger_mode"] = ttk.Label(later_frame, text="触发方式")
@@ -2095,12 +2158,17 @@ class TimingDiagramApp:
             "trigger_mode": bool(self.selected_dep_ids),
             "trigger_value": bool(self.selected_dep_ids) and to_simplified(self.vars["trigger_mode"].get()) == "固定次数完成",
             "wait_cycles": bool(self.selected_dep_ids) and to_simplified(self.vars["trigger_mode"].get()) == "等待上一轮完成",
-            "later_trigger_mode": bool(self.selected_later_dep_ids),
-            "later_trigger_value": bool(self.selected_later_dep_ids)
+            "later_trigger_mode": bool(self.vars["use_later_rule"].get()) and bool(self.selected_later_dep_ids),
+            "later_trigger_value": bool(self.vars["use_later_rule"].get()) and bool(self.selected_later_dep_ids)
             and to_simplified(self.vars["later_trigger_mode"].get()) == "固定次数完成",
-            "later_wait_cycles": bool(self.selected_later_dep_ids)
+            "later_wait_cycles": bool(self.vars["use_later_rule"].get()) and bool(self.selected_later_dep_ids)
             and to_simplified(self.vars["later_trigger_mode"].get()) == "等待上一轮完成",
         }
+        if hasattr(self, "later_rule_frame"):
+            if self.vars["use_later_rule"].get():
+                self.later_rule_frame.grid()
+            else:
+                self.later_rule_frame.grid_remove()
         for key, should_show in visibility.items():
             label = self.form_labels.get(key)
             widget = self.form_widgets.get(key)
@@ -2146,6 +2214,7 @@ class TimingDiagramApp:
         repeat = count_to_int(self.vars["repeat"].get(), None)
         trigger_mode = to_simplified(self.vars["trigger_mode"].get().strip()) or "同次完成"
         later_trigger_mode = to_simplified(self.vars["later_trigger_mode"].get().strip()) or "同次完成"
+        use_later_rule = bool(self.vars["use_later_rule"].get())
         trigger_value = trigger_value_to_int(self.vars["trigger_value"].get(), 1)
         later_trigger_value = trigger_value_to_int(self.vars["later_trigger_value"].get(), 1)
         wait_cycles = to_int(self.vars["wait_cycles"].get(), 1)
@@ -2161,18 +2230,23 @@ class TimingDiagramApp:
             raise ValueError("重复次数必须是大于 0 的整数，例如 3。")
         if trigger_mode == "固定次数完成" and (trigger_value is None or trigger_value < 1):
             raise ValueError("第一轮等待到必须大于 0。")
-        if later_trigger_mode == "固定次数完成" and (later_trigger_value is None or later_trigger_value < 1):
+        if use_later_rule and later_trigger_mode == "固定次数完成" and (later_trigger_value is None or later_trigger_value < 1):
             raise ValueError("后续轮等待到必须大于 0。")
         if trigger_mode == "等待上一轮完成":
             if wait_cycles is None or wait_cycles < 1:
                 raise ValueError("第一轮等待轮数必须是 1 或更大的整数。")
         else:
             wait_cycles = 0
-        if later_trigger_mode == "等待上一轮完成":
+        if use_later_rule and later_trigger_mode == "等待上一轮完成":
             if later_wait_cycles is None or later_wait_cycles < 1:
                 raise ValueError("后续轮等待轮数必须是 1 或更大的整数。")
         else:
             later_wait_cycles = 0
+        if not use_later_rule:
+            self.selected_later_dep_ids = list(self.selected_dep_ids)
+            later_trigger_mode = trigger_mode
+            later_trigger_value = trigger_value
+            later_wait_cycles = wait_cycles
         if not station:
             raise ValueError("请填写动作主体。")
         if not action_text:
@@ -2193,6 +2267,7 @@ class TimingDiagramApp:
             trigger_value=trigger_value,
             later_trigger_mode=later_trigger_mode,
             later_trigger_value=later_trigger_value,
+            use_later_rule=use_later_rule,
             note=note_text,
         )
 
@@ -2205,7 +2280,8 @@ class TimingDiagramApp:
         self.vars["wait_cycles"].set(str(max(1, action.wait_cycles or 1) if action.trigger_mode == "等待上一轮完成" else 1))
         self.vars["later_wait_cycles"].set(str(max(1, action.later_wait_cycles or 1) if action.later_trigger_mode == "等待上一轮完成" else 1))
         self.selected_dep_ids = split_ids(action.depends_on)
-        self.selected_later_dep_ids = split_ids(action.later_depends_on)
+        self.vars["use_later_rule"].set(bool(action.use_later_rule))
+        self.selected_later_dep_ids = split_ids(action.later_depends_on) if action.use_later_rule else split_ids(action.depends_on)
         self.refresh_choice_options(exclude_action_id=action.action_id)
         self.dependency_var.set(self.dependency_ids_to_label(action.depends_on))
         self.refresh_dependency_listboxes()
@@ -2237,6 +2313,7 @@ class TimingDiagramApp:
         lang = self.current_lang()
         self.vars["trigger_mode"].set(zh_text("同次完成", lang))
         self.vars["trigger_value"].set(zh_text(TRIGGER_VALUE_LABELS[0], lang))
+        self.vars["use_later_rule"].set(False)
         self.vars["later_trigger_mode"].set(zh_text("同次完成", lang))
         self.vars["later_trigger_value"].set(zh_text(TRIGGER_VALUE_LABELS[0], lang))
         self.action_text.delete("1.0", tk.END)
@@ -2271,7 +2348,7 @@ class TimingDiagramApp:
                 station_nodes[station] = node_id
                 self.tree.insert("", tk.END, iid=node_id, text=station, open=True, values=("", "", "", "", "", ""), tags=("station_group",))
             first_dep_label = self.dependency_ids_to_label(action.depends_on)
-            later_dep_label = self.dependency_ids_to_label(action.later_depends_on)
+            later_dep_label = self.dependency_ids_to_label(action.later_depends_on) if action.use_later_rule else self.ui("同第一轮")
             trigger_parts = []
             if split_ids(action.depends_on):
                 first_trigger = f"{zh_text('首', self.current_lang())}:{zh_text(action.trigger_mode, self.current_lang())}"
@@ -2280,7 +2357,7 @@ class TimingDiagramApp:
                 if action.trigger_mode == "等待上一轮完成":
                     first_trigger += f"/{zh_text(f'等{max(1, action.wait_cycles or 1)}轮', self.current_lang())}"
                 trigger_parts.append(first_trigger)
-            if split_ids(action.later_depends_on):
+            if action.use_later_rule and split_ids(action.later_depends_on):
                 later_trigger = f"{zh_text('后', self.current_lang())}:{zh_text(action.later_trigger_mode, self.current_lang())}"
                 if action.later_trigger_mode == "固定次数完成":
                     later_trigger += f"/{zh_text(trigger_value_to_label(action.later_trigger_value), self.current_lang())}"
