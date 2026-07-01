@@ -13,6 +13,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import math
+import re
 import os
 import sys
 import traceback
@@ -544,11 +545,13 @@ def calculate_common_action_duration(item: dict, params: Dict[str, str]) -> floa
             "ceil": math.ceil,
             "floor": math.floor,
             "sqrt": math.sqrt,
+            "if_": lambda condition, true_value, false_value: true_value if condition else false_value,
             "pi": math.pi,
             **values,
         }
+        expression = re.sub(r"\bif\s*\(", "if_(", str(formula))
         try:
-            duration = float(eval(str(formula), safe_globals, safe_locals))
+            duration = float(eval(expression, safe_globals, safe_locals))
         except Exception as exc:
             raise ValueError(f"自定义公式计算失败：{exc}") from exc
     elif formula == "servo":
@@ -2014,12 +2017,23 @@ class TimingDiagramApp:
         win.rowconfigure(0, weight=1)
 
         left = ttk.Frame(win, padding=8)
-        right = ttk.Frame(win, padding=8)
+        right_container = ttk.Frame(win, padding=8)
         left.grid(row=0, column=0, sticky=tk.NSEW)
-        right.grid(row=0, column=1, sticky=tk.NSEW)
+        right_container.grid(row=0, column=1, sticky=tk.NSEW)
         left.rowconfigure(1, weight=1)
         left.columnconfigure(0, weight=1)
-        right.columnconfigure(1, weight=1)
+        right_container.rowconfigure(0, weight=1)
+        right_container.columnconfigure(0, weight=1)
+
+        pages = ttk.Notebook(right_container)
+        pages.grid(row=0, column=0, sticky=tk.NSEW)
+        user_page = ttk.Frame(pages, padding=8)
+        editor_page = ttk.Frame(pages, padding=8)
+        pages.add(user_page, text="使用者")
+        pages.add(editor_page, text="编辑者")
+        user_page.columnconfigure(0, weight=1)
+        editor_page.columnconfigure(1, weight=1)
+        right = editor_page
 
         ttk.Label(left, text=self.ui("选择常用动作")).grid(row=0, column=0, sticky=tk.W, pady=(0, 4))
         tree = ttk.Treeview(left, columns=("category", "time"), show="tree headings", height=14, selectmode="browse")
@@ -2042,7 +2056,19 @@ class TimingDiagramApp:
         result_var = tk.StringVar(value="")
         desc_var = tk.StringVar(value="")
         param_vars: Dict[str, tk.StringVar] = {}
+        user_param_vars: Dict[str, tk.StringVar] = {}
         selected_index = tk.IntVar(value=0)
+
+        ttk.Label(user_page, text="使用者只需选择动作并填写参数；公式和配置请到“编辑者”页面维护。", foreground="#475569", wraplength=380).grid(row=0, column=0, sticky=tk.EW, padx=4, pady=(4, 8))
+        user_desc_var = tk.StringVar(value="")
+        ttk.Label(user_page, textvariable=user_desc_var, foreground="#334155", wraplength=380).grid(row=1, column=0, sticky=tk.EW, padx=4, pady=(0, 8))
+        user_param_frame = ttk.LabelFrame(user_page, text=self.ui("参数"))
+        user_param_frame.grid(row=2, column=0, sticky=tk.EW, padx=4, pady=4)
+        user_param_frame.columnconfigure(1, weight=1)
+        user_result_var = tk.StringVar(value="")
+        ttk.Label(user_page, textvariable=user_result_var, foreground="#0f766e").grid(row=3, column=0, sticky=tk.W, padx=4, pady=(6, 4))
+        user_button_frame = ttk.Frame(user_page)
+        user_button_frame.grid(row=4, column=0, sticky=tk.EW, padx=4, pady=(10, 4))
 
         ttk.Label(right, text=self.ui("动作名称")).grid(row=0, column=0, sticky=tk.W, padx=4, pady=4)
         ttk.Entry(right, textvariable=name_var).grid(row=0, column=1, sticky=tk.EW, padx=4, pady=4)
@@ -2069,8 +2095,6 @@ class TimingDiagramApp:
         param_frame = ttk.LabelFrame(right, text=self.ui("参数"))
         param_frame.grid(row=5, column=0, columnspan=2, sticky=tk.EW, padx=4, pady=4)
         param_frame.columnconfigure(1, weight=1)
-        param_help_var = tk.StringVar(value="")
-        param_help = ttk.Label(param_frame, textvariable=param_help_var, foreground="#475569", wraplength=380, justify=tk.LEFT)
         param_text = tk.Text(param_frame, width=34, height=5, wrap=tk.NONE)
         fixed_frame = ttk.LabelFrame(right, text=self.ui("固定时间"))
         fixed_frame.grid(row=6, column=0, columnspan=2, sticky=tk.EW, padx=4, pady=4)
@@ -2130,8 +2154,7 @@ class TimingDiagramApp:
 
             def save_formula_editor() -> None:
                 formula_var.set(formula_text.get("1.0", tk.END).strip())
-                param_text.delete("1.0", tk.END)
-                param_text.insert("1.0", editor_param_text.get("1.0", tk.END).strip())
+                render_param_inputs(parse_param_lines(editor_param_text.get("1.0", tk.END)), mode_to_value() == "expression")
                 update_result()
                 editor.destroy()
 
@@ -2140,11 +2163,9 @@ class TimingDiagramApp:
             ttk.Button(button_row, text="保存公式", command=save_formula_editor).pack(side=tk.LEFT, padx=2)
             ttk.Button(button_row, text=self.ui("关闭"), command=editor.destroy).pack(side=tk.RIGHT, padx=2)
 
-        def parse_param_text() -> Dict[str, str]:
+        def parse_param_lines(text: str) -> Dict[str, str]:
             result = {}
-            if not hasattr(param_text, "winfo_exists"):
-                return result
-            for line in param_text.get("1.0", tk.END).splitlines():
+            for line in text.splitlines():
                 line = line.strip()
                 if not line:
                     continue
@@ -2161,11 +2182,56 @@ class TimingDiagramApp:
                     result[name] = value.strip()
             return result
 
+        def clear_param_frame() -> None:
+            for child in param_frame.winfo_children():
+                if child is param_text:
+                    child.grid_remove()
+                else:
+                    child.destroy()
+            param_vars.clear()
+            param_text.delete("1.0", tk.END)
+
+        def render_param_inputs(params: Dict[str, str], expression: bool = False) -> None:
+            clear_param_frame()
+            if not params:
+                ttk.Label(param_frame, text=self.ui("固定动作不需要参数。") if mode_to_value() == "fixed" else "当前公式没有参数。").grid(row=0, column=0, sticky=tk.W, padx=4, pady=4)
+                return
+            hint = "参数值：可点上方“编辑公式/参数”修改公式和参数列表。" if expression else "参数值"
+            ttk.Label(param_frame, text=hint).grid(row=0, column=0, columnspan=2, sticky=tk.W, padx=4, pady=(3, 6))
+            for row, (param_name, default) in enumerate(params.items(), start=1):
+                ttk.Label(param_frame, text=param_name).grid(row=row, column=0, sticky=tk.W, padx=4, pady=3)
+                var = tk.StringVar(value=str(default))
+                param_vars[param_name] = var
+                var.trace_add("write", update_result)
+                ttk.Entry(param_frame, textvariable=var, width=14).grid(row=row, column=1, sticky=tk.W, padx=4, pady=3)
+
         def current_params() -> Dict[str, str]:
             text_params = parse_param_text()
             if mode_to_value() == "expression":
                 return text_params
             return text_params or {name: var.get() for name, var in param_vars.items()}
+
+        def clear_user_param_frame() -> None:
+            for child in user_param_frame.winfo_children():
+                child.destroy()
+            user_param_vars.clear()
+
+        def render_user_param_inputs(item: dict) -> None:
+            clear_user_param_frame()
+            params = item.get("params", {}) if item.get("mode") != "fixed" else {}
+            if not params:
+                ttk.Label(user_param_frame, text="固定时间动作无需填写参数。" if item.get("mode") == "fixed" else "当前公式没有参数。").grid(row=0, column=0, sticky=tk.W, padx=4, pady=4)
+                return
+            ttk.Label(user_param_frame, text="参数值").grid(row=0, column=0, columnspan=2, sticky=tk.W, padx=4, pady=(3, 6))
+            for row, (param_name, default) in enumerate(params.items(), start=1):
+                ttk.Label(user_param_frame, text=param_name).grid(row=row, column=0, sticky=tk.W, padx=4, pady=3)
+                var = tk.StringVar(value=str(default))
+                user_param_vars[param_name] = var
+                var.trace_add("write", update_user_result)
+                ttk.Entry(user_param_frame, textvariable=var, width=14).grid(row=row, column=1, sticky=tk.W, padx=4, pady=3)
+
+        def current_user_params() -> Dict[str, str]:
+            return {name: var.get() for name, var in user_param_vars.items()}
 
         def update_result(*_args) -> Optional[float]:
             try:
@@ -2182,6 +2248,16 @@ class TimingDiagramApp:
                 result_var.set(f"{self.ui('计算失败')}：{zh_text(str(exc), self.current_lang())}")
                 return None
 
+        def update_user_result(*_args) -> Optional[float]:
+            try:
+                item = dict(selected_item())
+                duration = calculate_common_action_duration(item, current_user_params())
+                user_result_var.set(f"{self.ui('计算时间')}：{duration:g}s")
+                return duration
+            except Exception as exc:
+                user_result_var.set(f"{self.ui('计算失败')}：{zh_text(str(exc), self.current_lang())}")
+                return None
+
         def show_item(index: int) -> None:
             item = self.common_actions[index]
             selected_index.set(index)
@@ -2191,29 +2267,16 @@ class TimingDiagramApp:
             mode_var.set(value_to_mode(item.get("mode", "fixed")))
             formula_var.set(str(item.get("formula", "")))
             desc_var.set(zh_text(item.get("description", ""), self.current_lang()))
-            for child in param_frame.winfo_children():
-                if child in (param_text, param_help):
-                    child.grid_remove()
-                else:
-                    child.destroy()
-            param_vars.clear()
-            param_text.delete("1.0", tk.END)
-            param_help_var.set(formula_help_text())
-            param_help.grid(row=0, column=0, columnspan=2, sticky=tk.EW, padx=4, pady=(3, 8))
-            if item.get("mode") == "fixed":
-                ttk.Label(param_frame, text=self.ui("固定动作不需要参数。")).grid(row=1, column=0, sticky=tk.W, padx=4, pady=4)
-            elif item.get("mode") == "expression":
-                ttk.Label(param_frame, text="每行一个参数：名称=默认值；也可点上方“编辑公式/参数”集中编辑。").grid(row=1, column=0, sticky=tk.W, padx=4, pady=3)
-                param_text.grid(row=2, column=0, columnspan=2, sticky=tk.EW, padx=4, pady=3)
-                param_text.insert("1.0", "\n".join(f"{name}={value}" for name, value in item.get("params", {}).items()))
-                param_text.bind("<KeyRelease>", update_result)
+            user_desc_var.set(zh_text(item.get("description", ""), self.current_lang()))
+            render_user_param_inputs(item)
+            update_user_result()
+            mode = item.get("mode", "fixed")
+            if mode == "fixed":
+                fixed_frame.grid()
+                render_param_inputs({}, expression=False)
             else:
-                for row, (param_name, default) in enumerate(item.get("params", {}).items(), start=1):
-                    ttk.Label(param_frame, text=param_name).grid(row=row, column=0, sticky=tk.W, padx=4, pady=3)
-                    var = tk.StringVar(value=str(default))
-                    param_vars[param_name] = var
-                    var.trace_add("write", update_result)
-                    ttk.Entry(param_frame, textvariable=var, width=14).grid(row=row, column=1, sticky=tk.W, padx=4, pady=3)
+                fixed_frame.grid_remove()
+                render_param_inputs(item.get("params", {}), expression=(mode == "expression"))
             update_result()
 
         def refresh_tree() -> None:
@@ -2230,6 +2293,22 @@ class TimingDiagramApp:
             if self.common_actions:
                 tree.selection_set("0")
                 tree.focus("0")
+
+        def apply_user_to_form() -> None:
+            duration = update_user_result()
+            if duration is None:
+                messagebox.showerror(self.ui("输入错误"), user_result_var.get(), parent=win)
+                return
+            item = selected_item()
+            action_name = zh_text(item.get("name", ""), self.current_lang()).strip()
+            if not action_name:
+                messagebox.showerror(self.ui("输入错误"), self.ui("请填写动作。"), parent=win)
+                return
+            self.action_text.delete("1.0", tk.END)
+            self.action_text.insert("1.0", action_name)
+            self.vars["duration"].set(f"{duration:g}")
+            self.status_var.set(zh_text(f"已套用常用动作：{action_name}，时间 {duration:g}s。", self.current_lang()))
+            win.destroy()
 
         def apply_to_form() -> None:
             duration = update_result()
@@ -2325,6 +2404,8 @@ class TimingDiagramApp:
         ttk.Button(button_frame, text=self.ui("保存动作配置"), command=save_common_action).pack(side=tk.LEFT, padx=2)
         ttk.Button(button_frame, text=self.ui("删除配置"), command=delete_custom_action).pack(side=tk.LEFT, padx=2)
         ttk.Button(button_frame, text=self.ui("关闭"), command=win.destroy).pack(side=tk.RIGHT, padx=2)
+        ttk.Button(user_button_frame, text=self.ui("应用到动作"), command=apply_user_to_form).pack(side=tk.LEFT, padx=2)
+        ttk.Button(user_button_frame, text=self.ui("关闭"), command=win.destroy).pack(side=tk.RIGHT, padx=2)
 
         refresh_tree()
         show_item(0)
