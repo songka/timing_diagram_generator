@@ -1,0 +1,123 @@
+{
+  "actions": [
+    {
+      "name": "伺服轴移动",
+      "category": "伺服轴",
+      "mode": "formula",
+      "formula": "servo",
+      "builtin": true,
+      "params": {
+        "行程(mm)": 100,
+        "最高速度(mm/s)": 200,
+        "加速度(mm/s²)": 1000,
+        "减速度(mm/s²)": 1000
+      },
+      "description": "按梯形/三角速度曲线计算；行程短时自动按三角曲线处理"
+    },
+    {
+      "name": "气缸动作",
+      "category": "气缸",
+      "mode": "formula",
+      "formula": "cylinder",
+      "builtin": true,
+      "params": {
+        "行程(mm)": 50,
+        "缸径(mm)": 16,
+        "气压(MPa)": 0.5,
+        "有效流量(L/s)": 1.0,
+        "到位延时(s)": 0.05
+      },
+      "description": "按气缸容积、气压和有效流量估算：时间 = 等效耗气量 / 有效流量 + 到位延时"
+    },
+    {
+      "name": "真空吸附",
+      "category": "真空",
+      "mode": "formula",
+      "formula": "vacuum_on",
+      "builtin": true,
+      "params": {
+        "建压时间(s)": 0.2,
+        "检测延时(s)": 0.05
+      },
+      "description": "时间 = 建压时间 + 检测延时"
+    },
+    {
+      "name": "破真空",
+      "category": "真空",
+      "mode": "formula",
+      "formula": "vacuum_off",
+      "builtin": true,
+      "params": {
+        "破真空时间(s)": 0.15,
+        "确认延时(s)": 0.03
+      },
+      "description": "时间 = 破真空时间 + 确认延时"
+    },
+    {
+      "name": "人工取放",
+      "category": "人工",
+      "mode": "fixed",
+      "duration": 0.8,
+      "builtin": true,
+      "params": {},
+      "description": "标准人工取放参考时间",
+      "formula": ""
+    },
+    {
+      "name": "人工扫码/确认",
+      "category": "人工",
+      "mode": "fixed",
+      "duration": 0.5,
+      "builtin": true,
+      "params": {},
+      "description": "人工扫码、按钮确认等参考时间",
+      "formula": ""
+    },
+    {
+      "name": "机器人搬运",
+      "category": "机器人",
+      "mode": "expression",
+      "formula": "距离 / 速度 + 取放延时",
+      "builtin": true,
+      "params": {
+        "距离": 600,
+        "速度": 500,
+        "取放延时": 0.4
+      },
+      "description": "自定义公式示例：距离 / 速度 + 取放延时"
+    },
+    {
+      "name": "输送线移动",
+      "category": "输送线",
+      "mode": "expression",
+      "formula": "距离 / 速度 + 启停延时",
+      "builtin": true,
+      "params": {
+        "距离": 300,
+        "速度": 150,
+        "启停延时": 0.2
+      },
+      "description": "按输送距离和速度估算"
+    },
+    {
+      "name": "相机拍照检测",
+      "category": "检测",
+      "mode": "fixed",
+      "duration": 0.25,
+      "builtin": true,
+      "params": {},
+      "description": "拍照、曝光、基础算法处理参考时间",
+      "formula": ""
+    },
+    {
+      "name": "扫码枪读取",
+      "category": "检测",
+      "mode": "fixed",
+      "duration": 0.2,
+      "builtin": true,
+      "params": {},
+      "description": "条码/二维码读取参考时间",
+      "formula": ""
+    }
+  ]
+}
