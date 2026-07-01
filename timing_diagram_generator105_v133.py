@@ -316,6 +316,12 @@ DEFAULT_COMMON_ACTIONS = [
         "params": {"破真空时间(s)": 0.15, "确认延时(s)": 0.03},
         "description": "时间 = 破真空时间 + 确认延时",
     },
+    {"name": "人工取放", "category": "人工", "mode": "fixed", "duration": 0.8, "builtin": True, "params": {}, "description": "标准人工取放参考时间"},
+    {"name": "人工扫码/确认", "category": "人工", "mode": "fixed", "duration": 0.5, "builtin": True, "params": {}, "description": "人工扫码、按钮确认等参考时间"},
+    {"name": "机器人搬运", "category": "机器人", "mode": "expression", "formula": "距离 / 速度 + 取放延时", "builtin": True, "params": {"距离": 600, "速度": 500, "取放延时": 0.4}, "description": "自定义公式示例：距离 / 速度 + 取放延时"},
+    {"name": "输送线移动", "category": "输送线", "mode": "expression", "formula": "距离 / 速度 + 启停延时", "builtin": True, "params": {"距离": 300, "速度": 150, "启停延时": 0.2}, "description": "按输送距离和速度估算"},
+    {"name": "相机拍照检测", "category": "检测", "mode": "fixed", "duration": 0.25, "builtin": True, "params": {}, "description": "拍照、曝光、基础算法处理参考时间"},
+    {"name": "扫码枪读取", "category": "检测", "mode": "fixed", "duration": 0.2, "builtin": True, "params": {}, "description": "条码/二维码读取参考时间"},
 ]
 
 HEADER_ALIASES = {
@@ -443,53 +449,64 @@ def common_action_file_path() -> str:
 def copy_common_action(item: dict) -> dict:
     result = dict(item)
     result["params"] = dict(item.get("params", {}))
+    result.setdefault("mode", "fixed")
+    result.setdefault("category", "自定义")
+    result.setdefault("description", "")
+    result.setdefault("builtin", False)
     return result
 
 
+def normalize_common_action(item: dict, builtin: bool = False) -> Optional[dict]:
+    if not item.get("name"):
+        return None
+    action = copy_common_action(item)
+    action["name"] = str(action.get("name", "")).strip()
+    action["category"] = str(action.get("category", "自定义")).strip() or "自定义"
+    action["mode"] = str(action.get("mode", "fixed") or "fixed").strip()
+    action["formula"] = str(action.get("formula", "")).strip()
+    action["description"] = str(action.get("description", "")).strip()
+    action["builtin"] = bool(action.get("builtin", builtin))
+    if action["mode"] == "fixed":
+        action["duration"] = max(0.001, float(to_float(action.get("duration"), 0.1) or 0.1))
+        action["params"] = {}
+    elif action["mode"] in {"formula", "expression"}:
+        action["params"] = {str(k).strip(): v for k, v in dict(action.get("params", {})).items() if str(k).strip()}
+    else:
+        action["mode"] = "fixed"
+        action["duration"] = max(0.001, float(to_float(action.get("duration"), 0.1) or 0.1))
+        action["params"] = {}
+    return action
+
+
 def load_common_actions() -> List[dict]:
-    actions = [copy_common_action(item) for item in DEFAULT_COMMON_ACTIONS]
+    defaults = [normalize_common_action(item, builtin=True) for item in DEFAULT_COMMON_ACTIONS]
+    actions = [item for item in defaults if item is not None]
     path = common_action_file_path()
     if not os.path.exists(path):
+        save_custom_common_actions(actions)
         return actions
     try:
         with open(path, "r", encoding="utf-8") as file:
             data = json.load(file)
     except (OSError, json.JSONDecodeError):
         return actions
-    for item in data.get("custom_actions", []):
-        if not item.get("name"):
-            continue
-        custom = {
-            "name": str(item.get("name", "")).strip(),
-            "category": str(item.get("category", "自定义")).strip() or "自定义",
-            "mode": "fixed",
-            "duration": float(item.get("duration", 0.1) or 0.1),
-            "builtin": False,
-            "params": {},
-            "description": str(item.get("description", "固定时间")).strip() or "固定时间",
-        }
-        actions.append(custom)
-    return actions
+    configured = data.get("actions")
+    if configured is None:
+        configured = data.get("custom_actions", [])
+        configured = [*DEFAULT_COMMON_ACTIONS, *configured]
+    loaded = [normalize_common_action(item) for item in configured]
+    return [item for item in loaded if item is not None] or actions
 
 
 def save_custom_common_actions(actions: List[dict]) -> None:
-    custom_actions = []
+    serializable = []
     for item in actions:
-        if item.get("builtin"):
+        action = normalize_common_action(item)
+        if action is None:
             continue
-        duration = to_float(item.get("duration"), None)
-        if duration is None or duration <= 0:
-            continue
-        custom_actions.append(
-            {
-                "name": str(item.get("name", "")).strip(),
-                "category": str(item.get("category", "自定义")).strip() or "自定义",
-                "duration": round(duration, 3),
-                "description": str(item.get("description", "固定时间")).strip() or "固定时间",
-            }
-        )
+        serializable.append(action)
     with open(common_action_file_path(), "w", encoding="utf-8") as file:
-        json.dump({"custom_actions": custom_actions}, file, ensure_ascii=False, indent=2)
+        json.dump({"actions": serializable}, file, ensure_ascii=False, indent=2)
 
 
 def calculate_common_action_duration(item: dict, params: Dict[str, str]) -> float:
@@ -507,7 +524,26 @@ def calculate_common_action_duration(item: dict, params: Dict[str, str]) -> floa
         values[name] = value
 
     formula = item.get("formula")
-    if formula == "servo":
+    if item.get("mode") == "expression":
+        if not str(formula).strip():
+            raise ValueError("自定义公式不能为空。")
+        safe_globals = {"__builtins__": {}}
+        safe_locals = {
+            "abs": abs,
+            "min": min,
+            "max": max,
+            "round": round,
+            "ceil": math.ceil,
+            "floor": math.floor,
+            "sqrt": math.sqrt,
+            "pi": math.pi,
+            **values,
+        }
+        try:
+            duration = float(eval(str(formula), safe_globals, safe_locals))
+        except Exception as exc:
+            raise ValueError(f"自定义公式计算失败：{exc}") from exc
+    elif formula == "servo":
         distance = values.get("行程(mm)", 0)
         max_speed = values.get("最高速度(mm/s)", 0)
         accel = values.get("加速度(mm/s²)", 0)
@@ -1962,7 +1998,7 @@ class TimingDiagramApp:
     def open_common_action_dialog(self) -> None:
         win = tk.Toplevel(self.root)
         win.title(self.ui("常用动作时间"))
-        win.geometry("760x480")
+        win.geometry("900x620")
         win.transient(self.root)
         win.grab_set()
         win.columnconfigure(0, weight=1)
@@ -1993,6 +2029,8 @@ class TimingDiagramApp:
         name_var = tk.StringVar()
         category_var = tk.StringVar(value="自定义")
         fixed_duration_var = tk.StringVar()
+        mode_var = tk.StringVar(value="固定时间")
+        formula_var = tk.StringVar()
         result_var = tk.StringVar(value="")
         desc_var = tk.StringVar(value="")
         param_vars: Dict[str, tk.StringVar] = {}
@@ -2007,29 +2045,75 @@ class TimingDiagramApp:
             values=[self.ui(item) for item in ("伺服轴", "气缸", "真空", "自定义")],
             width=14,
         ).grid(row=1, column=1, sticky=tk.W, padx=4, pady=4)
-        ttk.Label(right, textvariable=desc_var, foreground="#334155", wraplength=320).grid(row=2, column=0, columnspan=2, sticky=tk.EW, padx=4, pady=(4, 8))
+        ttk.Label(right, text="类型").grid(row=2, column=0, sticky=tk.W, padx=4, pady=4)
+        mode_combo = ttk.Combobox(right, textvariable=mode_var, values=("固定时间", "内置公式", "自定义公式"), state="readonly", width=14)
+        mode_combo.grid(row=2, column=1, sticky=tk.W, padx=4, pady=4)
+        ttk.Label(right, textvariable=desc_var, foreground="#334155", wraplength=380).grid(row=3, column=0, columnspan=2, sticky=tk.EW, padx=4, pady=(4, 8))
+
+        formula_frame = ttk.LabelFrame(right, text="公式")
+        formula_frame.grid(row=4, column=0, columnspan=2, sticky=tk.EW, padx=4, pady=4)
+        formula_frame.columnconfigure(1, weight=1)
+        ttk.Label(formula_frame, text="表达式/内置名").grid(row=0, column=0, sticky=tk.W, padx=4, pady=4)
+        ttk.Entry(formula_frame, textvariable=formula_var, width=36).grid(row=0, column=1, sticky=tk.EW, padx=4, pady=4)
 
         param_frame = ttk.LabelFrame(right, text=self.ui("参数"))
-        param_frame.grid(row=3, column=0, columnspan=2, sticky=tk.EW, padx=4, pady=4)
+        param_frame.grid(row=5, column=0, columnspan=2, sticky=tk.EW, padx=4, pady=4)
         param_frame.columnconfigure(1, weight=1)
+        param_text = tk.Text(param_frame, width=34, height=5, wrap=tk.NONE)
         fixed_frame = ttk.LabelFrame(right, text=self.ui("固定时间"))
-        fixed_frame.grid(row=4, column=0, columnspan=2, sticky=tk.EW, padx=4, pady=4)
+        fixed_frame.grid(row=6, column=0, columnspan=2, sticky=tk.EW, padx=4, pady=4)
         fixed_frame.columnconfigure(1, weight=1)
         ttk.Label(fixed_frame, text="时间(s)").grid(row=0, column=0, sticky=tk.W, padx=4, pady=4)
         ttk.Entry(fixed_frame, textvariable=fixed_duration_var, width=12).grid(row=0, column=1, sticky=tk.W, padx=4, pady=4)
-        ttk.Label(right, textvariable=result_var, foreground="#0f766e").grid(row=5, column=0, columnspan=2, sticky=tk.W, padx=4, pady=(6, 4))
+        ttk.Label(right, textvariable=result_var, foreground="#0f766e").grid(row=7, column=0, columnspan=2, sticky=tk.W, padx=4, pady=(6, 4))
 
         def selected_item() -> dict:
             return self.common_actions[selected_index.get()]
 
+        def mode_to_value() -> str:
+            label = mode_var.get()
+            if label == "自定义公式":
+                return "expression"
+            if label == "内置公式":
+                return "formula"
+            return "fixed"
+
+        def value_to_mode(mode: str) -> str:
+            return {"expression": "自定义公式", "formula": "内置公式"}.get(mode, "固定时间")
+
+        def parse_param_text() -> Dict[str, str]:
+            result = {}
+            if not hasattr(param_text, "winfo_exists"):
+                return result
+            for line in param_text.get("1.0", tk.END).splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                if "=" in line:
+                    name, value = line.split("=", 1)
+                elif "：" in line:
+                    name, value = line.split("：", 1)
+                elif ":" in line:
+                    name, value = line.split(":", 1)
+                else:
+                    name, value = line, "0"
+                name = name.strip()
+                if name:
+                    result[name] = value.strip()
+            return result
+
         def current_params() -> Dict[str, str]:
+            if mode_to_value() == "expression":
+                return parse_param_text()
             return {name: var.get() for name, var in param_vars.items()}
 
         def update_result(*_args) -> Optional[float]:
             try:
-                item = selected_item()
+                item = dict(selected_item())
+                item["mode"] = mode_to_value()
+                item["formula"] = formula_var.get().strip()
+                item["params"] = current_params()
                 if item.get("mode") == "fixed":
-                    item = dict(item)
                     item["duration"] = fixed_duration_var.get()
                 duration = calculate_common_action_duration(item, current_params())
                 result_var.set(f"{self.ui('计算时间')}：{duration:g}s")
@@ -2044,12 +2128,23 @@ class TimingDiagramApp:
             name_var.set(zh_text(item.get("name", ""), self.current_lang()))
             category_var.set(zh_text(item.get("category", "自定义"), self.current_lang()))
             fixed_duration_var.set(str(item.get("duration", "")))
+            mode_var.set(value_to_mode(item.get("mode", "fixed")))
+            formula_var.set(str(item.get("formula", "")))
             desc_var.set(zh_text(item.get("description", ""), self.current_lang()))
             for child in param_frame.winfo_children():
-                child.destroy()
+                if child is param_text:
+                    child.grid_remove()
+                else:
+                    child.destroy()
             param_vars.clear()
+            param_text.delete("1.0", tk.END)
             if item.get("mode") == "fixed":
                 ttk.Label(param_frame, text=self.ui("固定动作不需要参数。")).grid(row=0, column=0, sticky=tk.W, padx=4, pady=4)
+            elif item.get("mode") == "expression":
+                ttk.Label(param_frame, text="每行一个参数：名称=默认值").grid(row=0, column=0, sticky=tk.W, padx=4, pady=3)
+                param_text.grid(row=1, column=0, columnspan=2, sticky=tk.EW, padx=4, pady=3)
+                param_text.insert("1.0", "\n".join(f"{name}={value}" for name, value in item.get("params", {}).items()))
+                param_text.bind("<KeyRelease>", update_result)
             else:
                 for row, (param_name, default) in enumerate(item.get("params", {}).items()):
                     ttk.Label(param_frame, text=param_name).grid(row=row, column=0, sticky=tk.W, padx=4, pady=3)
@@ -2062,7 +2157,7 @@ class TimingDiagramApp:
         def refresh_tree() -> None:
             tree.delete(*tree.get_children())
             for index, item in enumerate(self.common_actions):
-                time_text = f"{float(item.get('duration', 0)):g}s" if item.get("mode") == "fixed" else self.ui("公式")
+                time_text = f"{float(item.get('duration', 0)):g}s" if item.get("mode") == "fixed" else ("自定义公式" if item.get("mode") == "expression" else self.ui("公式"))
                 tree.insert(
                     "",
                     tk.END,
@@ -2089,7 +2184,7 @@ class TimingDiagramApp:
             self.status_var.set(zh_text(f"已套用常用动作：{action_name}，时间 {duration:g}s。", self.current_lang()))
             win.destroy()
 
-        def save_fixed_action() -> None:
+        def save_common_action() -> None:
             duration = update_result()
             if duration is None:
                 messagebox.showerror(self.ui("输入错误"), result_var.get(), parent=win)
@@ -2098,17 +2193,19 @@ class TimingDiagramApp:
             if not name:
                 messagebox.showerror(self.ui("输入错误"), self.ui("请填写动作。"), parent=win)
                 return
+            mode = mode_to_value()
             new_item = {
                 "name": to_simplified(name),
                 "category": to_simplified(category_var.get().strip()) or "自定义",
-                "mode": "fixed",
-                "duration": duration,
+                "mode": mode,
+                "duration": duration if mode == "fixed" else 0,
+                "formula": formula_var.get().strip(),
                 "builtin": False,
-                "params": {},
-                "description": "固定时间",
+                "params": current_params() if mode != "fixed" else {},
+                "description": desc_var.get().strip() or ("固定时间" if mode == "fixed" else "自定义公式"),
             }
             for index, item in enumerate(self.common_actions):
-                if not item.get("builtin") and item.get("name") == new_item["name"]:
+                if item.get("name") == new_item["name"]:
                     self.common_actions[index] = new_item
                     selected_index.set(index)
                     break
@@ -2121,17 +2218,33 @@ class TimingDiagramApp:
             show_item(selected_index.get())
             self.status_var.set(zh_text("常用动作时间已保存。", self.current_lang()))
 
+        def new_expression_action() -> None:
+            self.common_actions.append(
+                {
+                    "name": "自定义公式动作",
+                    "category": "自定义",
+                    "mode": "expression",
+                    "formula": "距离 / 速度 + 延时",
+                    "params": {"距离": 100, "速度": 100, "延时": 0.1},
+                    "duration": 0,
+                    "builtin": False,
+                    "description": "每行填写一个参数，公式可直接使用参数名。",
+                }
+            )
+            selected_index.set(len(self.common_actions) - 1)
+            refresh_tree()
+            tree.selection_set(str(selected_index.get()))
+            show_item(selected_index.get())
+
         def delete_custom_action() -> None:
             item = selected_item()
-            if item.get("builtin"):
-                messagebox.showinfo(self.ui("提示"), self.ui("内置公式不能删除。"), parent=win)
-                return
-            if not messagebox.askyesno(self.ui("确认"), self.ui("确定删除这个自定义动作吗？"), parent=win):
+            if not messagebox.askyesno(self.ui("确认"), self.ui("确定删除这个动作吗？"), parent=win):
                 return
             del self.common_actions[selected_index.get()]
             save_custom_common_actions(self.common_actions)
             refresh_tree()
-            show_item(0)
+            if self.common_actions:
+                show_item(min(selected_index.get(), len(self.common_actions) - 1))
 
         def on_select(_event=None) -> None:
             selection = tree.selection()
@@ -2141,11 +2254,14 @@ class TimingDiagramApp:
         tree.bind("<<TreeviewSelect>>", on_select)
         tree.bind("<Double-1>", lambda _event: apply_to_form())
         fixed_duration_var.trace_add("write", update_result)
+        formula_var.trace_add("write", update_result)
+        mode_var.trace_add("write", update_result)
         button_frame = ttk.Frame(right)
-        button_frame.grid(row=6, column=0, columnspan=2, sticky=tk.EW, padx=4, pady=(10, 4))
+        button_frame.grid(row=8, column=0, columnspan=2, sticky=tk.EW, padx=4, pady=(10, 4))
         ttk.Button(button_frame, text=self.ui("应用到动作"), command=apply_to_form).pack(side=tk.LEFT, padx=2)
-        ttk.Button(button_frame, text=self.ui("保存固定动作"), command=save_fixed_action).pack(side=tk.LEFT, padx=2)
-        ttk.Button(button_frame, text=self.ui("删除自定义"), command=delete_custom_action).pack(side=tk.LEFT, padx=2)
+        ttk.Button(button_frame, text="新增公式", command=new_expression_action).pack(side=tk.LEFT, padx=2)
+        ttk.Button(button_frame, text=self.ui("保存动作配置"), command=save_common_action).pack(side=tk.LEFT, padx=2)
+        ttk.Button(button_frame, text=self.ui("删除配置"), command=delete_custom_action).pack(side=tk.LEFT, padx=2)
         ttk.Button(button_frame, text=self.ui("关闭"), command=win.destroy).pack(side=tk.RIGHT, padx=2)
 
         refresh_tree()
