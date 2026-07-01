@@ -54,6 +54,8 @@ S2T_PHRASES = {
     "等待设置": "等待設定",
     "第一轮": "第一輪",
     "后续轮": "後續輪",
+    "后续轮使用不同条件": "後續輪使用不同條件",
+    "同第一轮": "同第一輪",
     "触发方式": "觸發方式",
     "重复次数": "重複次數",
     "绘制轮数": "繪製輪數",
@@ -252,6 +254,7 @@ FLOW_HEADERS = [
     "后续轮等待轮数",
     "后续轮触发方式",
     "后续轮等待到",
+    "后续轮使用不同条件",
     "备注",
 ]
 
@@ -313,6 +316,12 @@ DEFAULT_COMMON_ACTIONS = [
         "params": {"破真空时间(s)": 0.15, "确认延时(s)": 0.03},
         "description": "时间 = 破真空时间 + 确认延时",
     },
+    {"name": "人工取放", "category": "人工", "mode": "fixed", "duration": 0.8, "builtin": True, "params": {}, "description": "标准人工取放参考时间"},
+    {"name": "人工扫码/确认", "category": "人工", "mode": "fixed", "duration": 0.5, "builtin": True, "params": {}, "description": "人工扫码、按钮确认等参考时间"},
+    {"name": "机器人搬运", "category": "机器人", "mode": "expression", "formula": "距离 / 速度 + 取放延时", "builtin": True, "params": {"距离": 600, "速度": 500, "取放延时": 0.4}, "description": "自定义公式示例：距离 / 速度 + 取放延时"},
+    {"name": "输送线移动", "category": "输送线", "mode": "expression", "formula": "距离 / 速度 + 启停延时", "builtin": True, "params": {"距离": 300, "速度": 150, "启停延时": 0.2}, "description": "按输送距离和速度估算"},
+    {"name": "相机拍照检测", "category": "检测", "mode": "fixed", "duration": 0.25, "builtin": True, "params": {}, "description": "拍照、曝光、基础算法处理参考时间"},
+    {"name": "扫码枪读取", "category": "检测", "mode": "fixed", "duration": 0.2, "builtin": True, "params": {}, "description": "条码/二维码读取参考时间"},
 ]
 
 HEADER_ALIASES = {
@@ -343,6 +352,7 @@ class FlowAction:
     trigger_value: int = 1
     later_trigger_mode: str = "同次完成"
     later_trigger_value: int = 1
+    use_later_rule: bool = False
     note: str = ""
 
 
@@ -439,53 +449,64 @@ def common_action_file_path() -> str:
 def copy_common_action(item: dict) -> dict:
     result = dict(item)
     result["params"] = dict(item.get("params", {}))
+    result.setdefault("mode", "fixed")
+    result.setdefault("category", "自定义")
+    result.setdefault("description", "")
+    result.setdefault("builtin", False)
     return result
 
 
+def normalize_common_action(item: dict, builtin: bool = False) -> Optional[dict]:
+    if not item.get("name"):
+        return None
+    action = copy_common_action(item)
+    action["name"] = str(action.get("name", "")).strip()
+    action["category"] = str(action.get("category", "自定义")).strip() or "自定义"
+    action["mode"] = str(action.get("mode", "fixed") or "fixed").strip()
+    action["formula"] = str(action.get("formula", "")).strip()
+    action["description"] = str(action.get("description", "")).strip()
+    action["builtin"] = bool(action.get("builtin", builtin))
+    if action["mode"] == "fixed":
+        action["duration"] = max(0.001, float(to_float(action.get("duration"), 0.1) or 0.1))
+        action["params"] = {}
+    elif action["mode"] in {"formula", "expression"}:
+        action["params"] = {str(k).strip(): v for k, v in dict(action.get("params", {})).items() if str(k).strip()}
+    else:
+        action["mode"] = "fixed"
+        action["duration"] = max(0.001, float(to_float(action.get("duration"), 0.1) or 0.1))
+        action["params"] = {}
+    return action
+
+
 def load_common_actions() -> List[dict]:
-    actions = [copy_common_action(item) for item in DEFAULT_COMMON_ACTIONS]
+    defaults = [normalize_common_action(item, builtin=True) for item in DEFAULT_COMMON_ACTIONS]
+    actions = [item for item in defaults if item is not None]
     path = common_action_file_path()
     if not os.path.exists(path):
+        save_custom_common_actions(actions)
         return actions
     try:
         with open(path, "r", encoding="utf-8") as file:
             data = json.load(file)
     except (OSError, json.JSONDecodeError):
         return actions
-    for item in data.get("custom_actions", []):
-        if not item.get("name"):
-            continue
-        custom = {
-            "name": str(item.get("name", "")).strip(),
-            "category": str(item.get("category", "自定义")).strip() or "自定义",
-            "mode": "fixed",
-            "duration": float(item.get("duration", 0.1) or 0.1),
-            "builtin": False,
-            "params": {},
-            "description": str(item.get("description", "固定时间")).strip() or "固定时间",
-        }
-        actions.append(custom)
-    return actions
+    configured = data.get("actions")
+    if configured is None:
+        configured = data.get("custom_actions", [])
+        configured = [*DEFAULT_COMMON_ACTIONS, *configured]
+    loaded = [normalize_common_action(item) for item in configured]
+    return [item for item in loaded if item is not None] or actions
 
 
 def save_custom_common_actions(actions: List[dict]) -> None:
-    custom_actions = []
+    serializable = []
     for item in actions:
-        if item.get("builtin"):
+        action = normalize_common_action(item)
+        if action is None:
             continue
-        duration = to_float(item.get("duration"), None)
-        if duration is None or duration <= 0:
-            continue
-        custom_actions.append(
-            {
-                "name": str(item.get("name", "")).strip(),
-                "category": str(item.get("category", "自定义")).strip() or "自定义",
-                "duration": round(duration, 3),
-                "description": str(item.get("description", "固定时间")).strip() or "固定时间",
-            }
-        )
+        serializable.append(action)
     with open(common_action_file_path(), "w", encoding="utf-8") as file:
-        json.dump({"custom_actions": custom_actions}, file, ensure_ascii=False, indent=2)
+        json.dump({"actions": serializable}, file, ensure_ascii=False, indent=2)
 
 
 def calculate_common_action_duration(item: dict, params: Dict[str, str]) -> float:
@@ -503,7 +524,26 @@ def calculate_common_action_duration(item: dict, params: Dict[str, str]) -> floa
         values[name] = value
 
     formula = item.get("formula")
-    if formula == "servo":
+    if item.get("mode") == "expression":
+        if not str(formula).strip():
+            raise ValueError("自定义公式不能为空。")
+        safe_globals = {"__builtins__": {}}
+        safe_locals = {
+            "abs": abs,
+            "min": min,
+            "max": max,
+            "round": round,
+            "ceil": math.ceil,
+            "floor": math.floor,
+            "sqrt": math.sqrt,
+            "pi": math.pi,
+            **values,
+        }
+        try:
+            duration = float(eval(str(formula), safe_globals, safe_locals))
+        except Exception as exc:
+            raise ValueError(f"自定义公式计算失败：{exc}") from exc
+    elif formula == "servo":
         distance = values.get("行程(mm)", 0)
         max_speed = values.get("最高速度(mm/s)", 0)
         accel = values.get("加速度(mm/s²)", 0)
@@ -601,6 +641,11 @@ def clean_text(value) -> str:
     return str(value).strip()
 
 
+def bool_from_cell(value) -> bool:
+    text = to_simplified(clean_text(value)).lower()
+    return text in {"1", "true", "yes", "y", "是", "使用", "不同", "启用", "勾选"}
+
+
 def header_map(ws) -> Dict[str, int]:
     result: Dict[str, int] = {}
     first_row = [to_simplified(clean_text(ws.cell(row=1, column=c).value)) for c in range(1, ws.max_column + 1)]
@@ -632,13 +677,40 @@ def action_effective_cycle(action: FlowAction, cycle: int, occurrence: int) -> i
     return cycle
 
 
+def action_wait_interval(action: FlowAction, use_later_rule: bool) -> int:
+    mode = action.later_trigger_mode if use_later_rule else action.trigger_mode
+    cycles = action.later_wait_cycles if use_later_rule else action.wait_cycles
+    if mode != "等待上一轮完成":
+        return 0
+    return max(1, int(cycles or 1))
+
+
+def action_first_run_cycle(action: FlowAction) -> int:
+    if split_ids(action.depends_on) and action.trigger_mode == "等待上一轮完成":
+        return max(1, int(action.wait_cycles or 1)) + 1
+    return 1
+
+
 def action_runs_in_cycle(action: FlowAction, effective_cycle: int) -> bool:
-    if effective_cycle <= 1:
+    first_cycle = action_first_run_cycle(action)
+    if effective_cycle < first_cycle:
+        return False
+    if effective_cycle == first_cycle:
         return True
-    if action.later_trigger_mode == "等待上一轮完成" and split_ids(action.later_depends_on):
-        interval = max(1, int(action.later_wait_cycles or 1))
-        return (effective_cycle - 1) % interval == 0
-    return True
+
+    use_later_rule = bool(action.use_later_rule)
+    interval = action_wait_interval(action, use_later_rule)
+    if interval <= 0:
+        interval = action_wait_interval(action, False)
+    if interval <= 0:
+        return True
+
+    # 第一轮通过“其它条件”触发时，后续“等上一轮 M 次”需要从 M+2 轮开始；
+    # 第一轮无条件或第一轮本身也是“等上一轮”时，则从首轮动作后每 M 轮触发一次。
+    offset = 1 if (use_later_rule and split_ids(action.depends_on) and action.trigger_mode != "等待上一轮完成") else 0
+    if effective_cycle < first_cycle + offset + interval:
+        return False
+    return (effective_cycle - first_cycle - offset) % interval == 0
 
 
 def dependency_event_for_effective_cycle(
@@ -745,11 +817,12 @@ def build_events_from_actions(actions: List[FlowAction], cycle_count: int = 1) -
                 event = event_by_key.get((action.action_id, cycle, occurrence))
                 if event is None:
                     continue
-                use_first_rule = event.get("effective_cycle", cycle) == 1
-                dep_ids = split_ids(action.depends_on if use_first_rule else action.later_depends_on)
-                trigger_mode = action.trigger_mode if use_first_rule else action.later_trigger_mode
-                trigger_value = action.trigger_value if use_first_rule else action.later_trigger_value
-                wait_cycles = action.wait_cycles if use_first_rule else action.later_wait_cycles
+                use_first_rule = event.get("effective_cycle", cycle) == action_first_run_cycle(action)
+                use_later_rule = bool(action.use_later_rule) and not use_first_rule
+                dep_ids = split_ids(action.later_depends_on if use_later_rule else action.depends_on)
+                trigger_mode = action.later_trigger_mode if use_later_rule else action.trigger_mode
+                trigger_value = action.later_trigger_value if use_later_rule else action.trigger_value
+                wait_cycles = action.later_wait_cycles if use_later_rule else action.wait_cycles
                 wait_cycles = max(1, int(wait_cycles or 1)) if trigger_mode == "等待上一轮完成" else 0
                 if occurrence > 1:
                     prev_event = event_by_key.get((action.action_id, cycle, occurrence - 1))
@@ -775,9 +848,11 @@ def build_events_from_actions(actions: List[FlowAction], cycle_count: int = 1) -
                         raise ValueError(f"{action_error_label(action)} 等待了不存在的动作 {dep_id}。")
                     dep_action = action_by_id[dep_id]
                     if trigger_mode == "等待上一轮完成":
-                        if event["effective_cycle"] <= wait_cycles:
-                            continue
+                        # 等待轮数控制本动作隔几轮执行；真正依赖的是被等待动作的上一轮完成。
+                        # 例如本动作第 3 轮触发时，应等待被等待动作第 2 轮完成。
                         target_effective_cycle = event["effective_cycle"] - 1
+                        if target_effective_cycle < 1:
+                            continue
                         dep_event = dependency_event_for_effective_cycle(
                             event_by_key,
                             dep_action,
@@ -803,7 +878,7 @@ def build_events_from_actions(actions: List[FlowAction], cycle_count: int = 1) -
                     if dep_effective_cycle != event["effective_cycle"]:
                         offset = event["effective_cycle"] - dep_effective_cycle
                         cycle_note = "上一轮" if offset == 1 else f"上 {offset} 轮"
-                    edge_kind = "later_wait" if cycle > 1 and action.later_depends_on else "first_wait"
+                    edge_kind = "later_wait" if use_later_rule else "first_wait"
                     add_event_dependency(
                         event,
                         dep_event,
@@ -905,6 +980,7 @@ def load_actions_from_sheet(ws) -> List[FlowAction]:
             first_trigger_value_col,
             later_trigger_mode_col,
             later_trigger_value_col,
+            positions.get("后续轮使用不同条件"),
             positions.get("备注"),
         ]
         return any(clean_text(ws.cell(row=row, column=col).value) for col in content_columns if col)
@@ -956,6 +1032,11 @@ def load_actions_from_sheet(ws) -> List[FlowAction]:
                 ws.cell(row=row, column=later_trigger_value_col).value if later_trigger_value_col else "",
                 1,
             ),
+            use_later_rule=bool_from_cell(cell_value(row, "后续轮使用不同条件"))
+            or bool(clean_text(cell_value(row, "后续轮等待动作编号")))
+            or bool(clean_text(cell_value(row, "后续轮等待轮数")))
+            or bool(clean_text(cell_value(row, "后续轮触发方式")))
+            or bool(clean_text(cell_value(row, "后续轮等待到"))),
             note=clean_text(cell_value(row, "备注")),
         )
         if action.trigger_mode == "上一次完成":
@@ -966,6 +1047,11 @@ def load_actions_from_sheet(ws) -> List[FlowAction]:
             action.trigger_mode = "同次完成"
         if action.later_trigger_mode not in TRIGGER_MODES:
             action.later_trigger_mode = action.trigger_mode
+        if not action.use_later_rule:
+            action.later_depends_on = action.depends_on
+            action.later_wait_cycles = action.wait_cycles
+            action.later_trigger_mode = action.trigger_mode
+            action.later_trigger_value = action.trigger_value
         actions.append(action)
     return actions
 
@@ -1152,11 +1238,12 @@ def write_template_workbook(path: str, lang: str = "zh_cn") -> None:
         "后续轮等待轮数",
         "后续轮触发方式",
         "后续轮等待到",
+        "后续轮使用不同条件",
         "备注",
     ]
     ws.append([zh_text(header, lang) for header in headers])
     style_header(ws, len(headers))
-    autofit(ws, {1: 10, 2: 16, 3: 34, 4: 10, 5: 10, 6: 18, 7: 12, 8: 16, 9: 12, 10: 18, 11: 12, 12: 16, 13: 12, 14: 28})
+    autofit(ws, {1: 10, 2: 16, 3: 34, 4: 10, 5: 10, 6: 18, 7: 12, 8: 16, 9: 12, 10: 18, 11: 12, 12: 16, 13: 12, 14: 16, 15: 28})
     for row in range(2, 32):
         for col in range(1, len(headers) + 1):
             cell = ws.cell(row=row, column=col)
@@ -1196,7 +1283,8 @@ def write_template_workbook(path: str, lang: str = "zh_cn") -> None:
         ["第一轮等待轮数", "只有触发方式为等待上一轮完成时需要填；最小 1，1 表示上一轮，2 表示上两轮。"],
         ["第一轮触发方式", "同次完成：等对方第 1 次/第 2 次对应完成；固定次数完成：等到指定次数；等待上一轮完成：按等待轮数等历史轮次，第一轮通常不用。"],
         ["第一轮等待到", "只有触发方式为固定次数完成时需要填，例如 3 表示等对方第 3 次完成。"],
-        ["后续轮等待动作编号", "第 2 轮及以后需要用不同等待条件时填写。为空时不额外等待其它动作主体。动作编号不填时，按有效动作行顺序理解编号。"],
+        ["后续轮使用不同条件", "默认不用填写，后续轮沿用第一轮条件；只有需要不同等待条件时填“是”并填写后续轮等待列。"],
+        ["后续轮等待动作编号", "只有后续轮使用不同条件时填写。若本轮被等待的动作不执行，其它动作在本轮等待它时会自动跳过这个等待。动作编号不填时，按有效动作行顺序理解编号。"],
         ["后续轮等待轮数", "只有后续轮触发方式为等待上一轮完成时需要填；最小 1，1 表示上一轮，2 表示上两轮。"],
         ["后续轮触发方式", "后续轮的等待规则，可以和第一轮不同。"],
         ["后续轮等待到", "只有后续轮触发方式为固定次数完成时需要填。"],
@@ -1282,6 +1370,7 @@ def write_action_detail_sheet(ws, actions: List[FlowAction], events: List[dict],
             action.later_trigger_value
             if action.later_depends_on and action.later_trigger_mode == "固定次数完成"
             else "",
+            "是" if action.use_later_rule else "否",
             action.note,
         ]
         for col, value in enumerate(values, 1):
@@ -1613,6 +1702,7 @@ class TimingDiagramApp:
             "later_wait_cycles": tk.StringVar(value="1"),
             "later_trigger_mode": tk.StringVar(value="同次完成"),
             "later_trigger_value": tk.StringVar(value=TRIGGER_VALUE_LABELS[0]),
+            "use_later_rule": tk.BooleanVar(value=False),
             "note": tk.StringVar(),
         }
         self.dependency_var = tk.StringVar(value=WAIT_NONE_LABEL)
@@ -1713,8 +1803,17 @@ class TimingDiagramApp:
         ttk.Button(dep_buttons, text="移除", command=lambda: self.remove_selected_dependency("first")).pack(side=tk.LEFT, padx=1)
         ttk.Button(dep_buttons, text="清空", command=lambda: self.clear_selected_dependencies("first")).pack(side=tk.LEFT, padx=1)
 
+        self.use_later_rule_check = ttk.Checkbutton(
+            wait_frame,
+            text="后续轮使用不同条件",
+            variable=self.vars["use_later_rule"],
+            command=self.update_trigger_visibility,
+        )
+        self.use_later_rule_check.grid(row=2, column=0, columnspan=2, sticky=tk.W, padx=4, pady=(4, 0))
+
         later_frame = ttk.LabelFrame(wait_frame, text="后续轮")
-        later_frame.grid(row=2, column=0, columnspan=2, sticky=tk.EW, padx=4, pady=3)
+        self.later_rule_frame = later_frame
+        later_frame.grid(row=3, column=0, columnspan=2, sticky=tk.EW, padx=4, pady=3)
         later_frame.columnconfigure(3, weight=1)
         later_frame.rowconfigure(0, minsize=30)
         self.form_labels["later_trigger_mode"] = ttk.Label(later_frame, text="触发方式")
@@ -1899,7 +1998,7 @@ class TimingDiagramApp:
     def open_common_action_dialog(self) -> None:
         win = tk.Toplevel(self.root)
         win.title(self.ui("常用动作时间"))
-        win.geometry("760x480")
+        win.geometry("900x620")
         win.transient(self.root)
         win.grab_set()
         win.columnconfigure(0, weight=1)
@@ -1930,6 +2029,8 @@ class TimingDiagramApp:
         name_var = tk.StringVar()
         category_var = tk.StringVar(value="自定义")
         fixed_duration_var = tk.StringVar()
+        mode_var = tk.StringVar(value="固定时间")
+        formula_var = tk.StringVar()
         result_var = tk.StringVar(value="")
         desc_var = tk.StringVar(value="")
         param_vars: Dict[str, tk.StringVar] = {}
@@ -1944,29 +2045,75 @@ class TimingDiagramApp:
             values=[self.ui(item) for item in ("伺服轴", "气缸", "真空", "自定义")],
             width=14,
         ).grid(row=1, column=1, sticky=tk.W, padx=4, pady=4)
-        ttk.Label(right, textvariable=desc_var, foreground="#334155", wraplength=320).grid(row=2, column=0, columnspan=2, sticky=tk.EW, padx=4, pady=(4, 8))
+        ttk.Label(right, text="类型").grid(row=2, column=0, sticky=tk.W, padx=4, pady=4)
+        mode_combo = ttk.Combobox(right, textvariable=mode_var, values=("固定时间", "内置公式", "自定义公式"), state="readonly", width=14)
+        mode_combo.grid(row=2, column=1, sticky=tk.W, padx=4, pady=4)
+        ttk.Label(right, textvariable=desc_var, foreground="#334155", wraplength=380).grid(row=3, column=0, columnspan=2, sticky=tk.EW, padx=4, pady=(4, 8))
+
+        formula_frame = ttk.LabelFrame(right, text="公式")
+        formula_frame.grid(row=4, column=0, columnspan=2, sticky=tk.EW, padx=4, pady=4)
+        formula_frame.columnconfigure(1, weight=1)
+        ttk.Label(formula_frame, text="表达式/内置名").grid(row=0, column=0, sticky=tk.W, padx=4, pady=4)
+        ttk.Entry(formula_frame, textvariable=formula_var, width=36).grid(row=0, column=1, sticky=tk.EW, padx=4, pady=4)
 
         param_frame = ttk.LabelFrame(right, text=self.ui("参数"))
-        param_frame.grid(row=3, column=0, columnspan=2, sticky=tk.EW, padx=4, pady=4)
+        param_frame.grid(row=5, column=0, columnspan=2, sticky=tk.EW, padx=4, pady=4)
         param_frame.columnconfigure(1, weight=1)
+        param_text = tk.Text(param_frame, width=34, height=5, wrap=tk.NONE)
         fixed_frame = ttk.LabelFrame(right, text=self.ui("固定时间"))
-        fixed_frame.grid(row=4, column=0, columnspan=2, sticky=tk.EW, padx=4, pady=4)
+        fixed_frame.grid(row=6, column=0, columnspan=2, sticky=tk.EW, padx=4, pady=4)
         fixed_frame.columnconfigure(1, weight=1)
         ttk.Label(fixed_frame, text="时间(s)").grid(row=0, column=0, sticky=tk.W, padx=4, pady=4)
         ttk.Entry(fixed_frame, textvariable=fixed_duration_var, width=12).grid(row=0, column=1, sticky=tk.W, padx=4, pady=4)
-        ttk.Label(right, textvariable=result_var, foreground="#0f766e").grid(row=5, column=0, columnspan=2, sticky=tk.W, padx=4, pady=(6, 4))
+        ttk.Label(right, textvariable=result_var, foreground="#0f766e").grid(row=7, column=0, columnspan=2, sticky=tk.W, padx=4, pady=(6, 4))
 
         def selected_item() -> dict:
             return self.common_actions[selected_index.get()]
 
+        def mode_to_value() -> str:
+            label = mode_var.get()
+            if label == "自定义公式":
+                return "expression"
+            if label == "内置公式":
+                return "formula"
+            return "fixed"
+
+        def value_to_mode(mode: str) -> str:
+            return {"expression": "自定义公式", "formula": "内置公式"}.get(mode, "固定时间")
+
+        def parse_param_text() -> Dict[str, str]:
+            result = {}
+            if not hasattr(param_text, "winfo_exists"):
+                return result
+            for line in param_text.get("1.0", tk.END).splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                if "=" in line:
+                    name, value = line.split("=", 1)
+                elif "：" in line:
+                    name, value = line.split("：", 1)
+                elif ":" in line:
+                    name, value = line.split(":", 1)
+                else:
+                    name, value = line, "0"
+                name = name.strip()
+                if name:
+                    result[name] = value.strip()
+            return result
+
         def current_params() -> Dict[str, str]:
+            if mode_to_value() == "expression":
+                return parse_param_text()
             return {name: var.get() for name, var in param_vars.items()}
 
         def update_result(*_args) -> Optional[float]:
             try:
-                item = selected_item()
+                item = dict(selected_item())
+                item["mode"] = mode_to_value()
+                item["formula"] = formula_var.get().strip()
+                item["params"] = current_params()
                 if item.get("mode") == "fixed":
-                    item = dict(item)
                     item["duration"] = fixed_duration_var.get()
                 duration = calculate_common_action_duration(item, current_params())
                 result_var.set(f"{self.ui('计算时间')}：{duration:g}s")
@@ -1981,12 +2128,23 @@ class TimingDiagramApp:
             name_var.set(zh_text(item.get("name", ""), self.current_lang()))
             category_var.set(zh_text(item.get("category", "自定义"), self.current_lang()))
             fixed_duration_var.set(str(item.get("duration", "")))
+            mode_var.set(value_to_mode(item.get("mode", "fixed")))
+            formula_var.set(str(item.get("formula", "")))
             desc_var.set(zh_text(item.get("description", ""), self.current_lang()))
             for child in param_frame.winfo_children():
-                child.destroy()
+                if child is param_text:
+                    child.grid_remove()
+                else:
+                    child.destroy()
             param_vars.clear()
+            param_text.delete("1.0", tk.END)
             if item.get("mode") == "fixed":
                 ttk.Label(param_frame, text=self.ui("固定动作不需要参数。")).grid(row=0, column=0, sticky=tk.W, padx=4, pady=4)
+            elif item.get("mode") == "expression":
+                ttk.Label(param_frame, text="每行一个参数：名称=默认值").grid(row=0, column=0, sticky=tk.W, padx=4, pady=3)
+                param_text.grid(row=1, column=0, columnspan=2, sticky=tk.EW, padx=4, pady=3)
+                param_text.insert("1.0", "\n".join(f"{name}={value}" for name, value in item.get("params", {}).items()))
+                param_text.bind("<KeyRelease>", update_result)
             else:
                 for row, (param_name, default) in enumerate(item.get("params", {}).items()):
                     ttk.Label(param_frame, text=param_name).grid(row=row, column=0, sticky=tk.W, padx=4, pady=3)
@@ -1999,7 +2157,7 @@ class TimingDiagramApp:
         def refresh_tree() -> None:
             tree.delete(*tree.get_children())
             for index, item in enumerate(self.common_actions):
-                time_text = f"{float(item.get('duration', 0)):g}s" if item.get("mode") == "fixed" else self.ui("公式")
+                time_text = f"{float(item.get('duration', 0)):g}s" if item.get("mode") == "fixed" else ("自定义公式" if item.get("mode") == "expression" else self.ui("公式"))
                 tree.insert(
                     "",
                     tk.END,
@@ -2026,7 +2184,7 @@ class TimingDiagramApp:
             self.status_var.set(zh_text(f"已套用常用动作：{action_name}，时间 {duration:g}s。", self.current_lang()))
             win.destroy()
 
-        def save_fixed_action() -> None:
+        def save_common_action() -> None:
             duration = update_result()
             if duration is None:
                 messagebox.showerror(self.ui("输入错误"), result_var.get(), parent=win)
@@ -2035,17 +2193,19 @@ class TimingDiagramApp:
             if not name:
                 messagebox.showerror(self.ui("输入错误"), self.ui("请填写动作。"), parent=win)
                 return
+            mode = mode_to_value()
             new_item = {
                 "name": to_simplified(name),
                 "category": to_simplified(category_var.get().strip()) or "自定义",
-                "mode": "fixed",
-                "duration": duration,
+                "mode": mode,
+                "duration": duration if mode == "fixed" else 0,
+                "formula": formula_var.get().strip(),
                 "builtin": False,
-                "params": {},
-                "description": "固定时间",
+                "params": current_params() if mode != "fixed" else {},
+                "description": desc_var.get().strip() or ("固定时间" if mode == "fixed" else "自定义公式"),
             }
             for index, item in enumerate(self.common_actions):
-                if not item.get("builtin") and item.get("name") == new_item["name"]:
+                if item.get("name") == new_item["name"]:
                     self.common_actions[index] = new_item
                     selected_index.set(index)
                     break
@@ -2058,17 +2218,33 @@ class TimingDiagramApp:
             show_item(selected_index.get())
             self.status_var.set(zh_text("常用动作时间已保存。", self.current_lang()))
 
+        def new_expression_action() -> None:
+            self.common_actions.append(
+                {
+                    "name": "自定义公式动作",
+                    "category": "自定义",
+                    "mode": "expression",
+                    "formula": "距离 / 速度 + 延时",
+                    "params": {"距离": 100, "速度": 100, "延时": 0.1},
+                    "duration": 0,
+                    "builtin": False,
+                    "description": "每行填写一个参数，公式可直接使用参数名。",
+                }
+            )
+            selected_index.set(len(self.common_actions) - 1)
+            refresh_tree()
+            tree.selection_set(str(selected_index.get()))
+            show_item(selected_index.get())
+
         def delete_custom_action() -> None:
             item = selected_item()
-            if item.get("builtin"):
-                messagebox.showinfo(self.ui("提示"), self.ui("内置公式不能删除。"), parent=win)
-                return
-            if not messagebox.askyesno(self.ui("确认"), self.ui("确定删除这个自定义动作吗？"), parent=win):
+            if not messagebox.askyesno(self.ui("确认"), self.ui("确定删除这个动作吗？"), parent=win):
                 return
             del self.common_actions[selected_index.get()]
             save_custom_common_actions(self.common_actions)
             refresh_tree()
-            show_item(0)
+            if self.common_actions:
+                show_item(min(selected_index.get(), len(self.common_actions) - 1))
 
         def on_select(_event=None) -> None:
             selection = tree.selection()
@@ -2078,11 +2254,14 @@ class TimingDiagramApp:
         tree.bind("<<TreeviewSelect>>", on_select)
         tree.bind("<Double-1>", lambda _event: apply_to_form())
         fixed_duration_var.trace_add("write", update_result)
+        formula_var.trace_add("write", update_result)
+        mode_var.trace_add("write", update_result)
         button_frame = ttk.Frame(right)
-        button_frame.grid(row=6, column=0, columnspan=2, sticky=tk.EW, padx=4, pady=(10, 4))
+        button_frame.grid(row=8, column=0, columnspan=2, sticky=tk.EW, padx=4, pady=(10, 4))
         ttk.Button(button_frame, text=self.ui("应用到动作"), command=apply_to_form).pack(side=tk.LEFT, padx=2)
-        ttk.Button(button_frame, text=self.ui("保存固定动作"), command=save_fixed_action).pack(side=tk.LEFT, padx=2)
-        ttk.Button(button_frame, text=self.ui("删除自定义"), command=delete_custom_action).pack(side=tk.LEFT, padx=2)
+        ttk.Button(button_frame, text="新增公式", command=new_expression_action).pack(side=tk.LEFT, padx=2)
+        ttk.Button(button_frame, text=self.ui("保存动作配置"), command=save_common_action).pack(side=tk.LEFT, padx=2)
+        ttk.Button(button_frame, text=self.ui("删除配置"), command=delete_custom_action).pack(side=tk.LEFT, padx=2)
         ttk.Button(button_frame, text=self.ui("关闭"), command=win.destroy).pack(side=tk.RIGHT, padx=2)
 
         refresh_tree()
@@ -2095,12 +2274,17 @@ class TimingDiagramApp:
             "trigger_mode": bool(self.selected_dep_ids),
             "trigger_value": bool(self.selected_dep_ids) and to_simplified(self.vars["trigger_mode"].get()) == "固定次数完成",
             "wait_cycles": bool(self.selected_dep_ids) and to_simplified(self.vars["trigger_mode"].get()) == "等待上一轮完成",
-            "later_trigger_mode": bool(self.selected_later_dep_ids),
-            "later_trigger_value": bool(self.selected_later_dep_ids)
+            "later_trigger_mode": bool(self.vars["use_later_rule"].get()) and bool(self.selected_later_dep_ids),
+            "later_trigger_value": bool(self.vars["use_later_rule"].get()) and bool(self.selected_later_dep_ids)
             and to_simplified(self.vars["later_trigger_mode"].get()) == "固定次数完成",
-            "later_wait_cycles": bool(self.selected_later_dep_ids)
+            "later_wait_cycles": bool(self.vars["use_later_rule"].get()) and bool(self.selected_later_dep_ids)
             and to_simplified(self.vars["later_trigger_mode"].get()) == "等待上一轮完成",
         }
+        if hasattr(self, "later_rule_frame"):
+            if self.vars["use_later_rule"].get():
+                self.later_rule_frame.grid()
+            else:
+                self.later_rule_frame.grid_remove()
         for key, should_show in visibility.items():
             label = self.form_labels.get(key)
             widget = self.form_widgets.get(key)
@@ -2146,6 +2330,7 @@ class TimingDiagramApp:
         repeat = count_to_int(self.vars["repeat"].get(), None)
         trigger_mode = to_simplified(self.vars["trigger_mode"].get().strip()) or "同次完成"
         later_trigger_mode = to_simplified(self.vars["later_trigger_mode"].get().strip()) or "同次完成"
+        use_later_rule = bool(self.vars["use_later_rule"].get())
         trigger_value = trigger_value_to_int(self.vars["trigger_value"].get(), 1)
         later_trigger_value = trigger_value_to_int(self.vars["later_trigger_value"].get(), 1)
         wait_cycles = to_int(self.vars["wait_cycles"].get(), 1)
@@ -2161,18 +2346,23 @@ class TimingDiagramApp:
             raise ValueError("重复次数必须是大于 0 的整数，例如 3。")
         if trigger_mode == "固定次数完成" and (trigger_value is None or trigger_value < 1):
             raise ValueError("第一轮等待到必须大于 0。")
-        if later_trigger_mode == "固定次数完成" and (later_trigger_value is None or later_trigger_value < 1):
+        if use_later_rule and later_trigger_mode == "固定次数完成" and (later_trigger_value is None or later_trigger_value < 1):
             raise ValueError("后续轮等待到必须大于 0。")
         if trigger_mode == "等待上一轮完成":
             if wait_cycles is None or wait_cycles < 1:
                 raise ValueError("第一轮等待轮数必须是 1 或更大的整数。")
         else:
             wait_cycles = 0
-        if later_trigger_mode == "等待上一轮完成":
+        if use_later_rule and later_trigger_mode == "等待上一轮完成":
             if later_wait_cycles is None or later_wait_cycles < 1:
                 raise ValueError("后续轮等待轮数必须是 1 或更大的整数。")
         else:
             later_wait_cycles = 0
+        if not use_later_rule:
+            self.selected_later_dep_ids = list(self.selected_dep_ids)
+            later_trigger_mode = trigger_mode
+            later_trigger_value = trigger_value
+            later_wait_cycles = wait_cycles
         if not station:
             raise ValueError("请填写动作主体。")
         if not action_text:
@@ -2193,6 +2383,7 @@ class TimingDiagramApp:
             trigger_value=trigger_value,
             later_trigger_mode=later_trigger_mode,
             later_trigger_value=later_trigger_value,
+            use_later_rule=use_later_rule,
             note=note_text,
         )
 
@@ -2205,7 +2396,8 @@ class TimingDiagramApp:
         self.vars["wait_cycles"].set(str(max(1, action.wait_cycles or 1) if action.trigger_mode == "等待上一轮完成" else 1))
         self.vars["later_wait_cycles"].set(str(max(1, action.later_wait_cycles or 1) if action.later_trigger_mode == "等待上一轮完成" else 1))
         self.selected_dep_ids = split_ids(action.depends_on)
-        self.selected_later_dep_ids = split_ids(action.later_depends_on)
+        self.vars["use_later_rule"].set(bool(action.use_later_rule))
+        self.selected_later_dep_ids = split_ids(action.later_depends_on) if action.use_later_rule else split_ids(action.depends_on)
         self.refresh_choice_options(exclude_action_id=action.action_id)
         self.dependency_var.set(self.dependency_ids_to_label(action.depends_on))
         self.refresh_dependency_listboxes()
@@ -2237,6 +2429,7 @@ class TimingDiagramApp:
         lang = self.current_lang()
         self.vars["trigger_mode"].set(zh_text("同次完成", lang))
         self.vars["trigger_value"].set(zh_text(TRIGGER_VALUE_LABELS[0], lang))
+        self.vars["use_later_rule"].set(False)
         self.vars["later_trigger_mode"].set(zh_text("同次完成", lang))
         self.vars["later_trigger_value"].set(zh_text(TRIGGER_VALUE_LABELS[0], lang))
         self.action_text.delete("1.0", tk.END)
@@ -2271,7 +2464,7 @@ class TimingDiagramApp:
                 station_nodes[station] = node_id
                 self.tree.insert("", tk.END, iid=node_id, text=station, open=True, values=("", "", "", "", "", ""), tags=("station_group",))
             first_dep_label = self.dependency_ids_to_label(action.depends_on)
-            later_dep_label = self.dependency_ids_to_label(action.later_depends_on)
+            later_dep_label = self.dependency_ids_to_label(action.later_depends_on) if action.use_later_rule else self.ui("同第一轮")
             trigger_parts = []
             if split_ids(action.depends_on):
                 first_trigger = f"{zh_text('首', self.current_lang())}:{zh_text(action.trigger_mode, self.current_lang())}"
@@ -2280,7 +2473,7 @@ class TimingDiagramApp:
                 if action.trigger_mode == "等待上一轮完成":
                     first_trigger += f"/{zh_text(f'等{max(1, action.wait_cycles or 1)}轮', self.current_lang())}"
                 trigger_parts.append(first_trigger)
-            if split_ids(action.later_depends_on):
+            if action.use_later_rule and split_ids(action.later_depends_on):
                 later_trigger = f"{zh_text('后', self.current_lang())}:{zh_text(action.later_trigger_mode, self.current_lang())}"
                 if action.later_trigger_mode == "固定次数完成":
                     later_trigger += f"/{zh_text(trigger_value_to_label(action.later_trigger_value), self.current_lang())}"
