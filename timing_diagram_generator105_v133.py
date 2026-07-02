@@ -2290,6 +2290,72 @@ class TimingDiagramApp:
         def current_user_params() -> Dict[str, str]:
             return {name: var.get() for name, var in user_param_vars.items()}
 
+        def clear_user_param_frame() -> None:
+            for child in user_param_frame.winfo_children():
+                child.destroy()
+            user_param_vars.clear()
+
+        def render_user_param_inputs(item: dict) -> None:
+            clear_user_param_frame()
+            params = item.get("params", {}) if item.get("mode") != "fixed" else {}
+            if not params:
+                ttk.Label(user_param_frame, text="固定时间动作无需填写参数。" if item.get("mode") == "fixed" else "当前公式没有参数。").grid(row=0, column=0, sticky=tk.W, padx=4, pady=4)
+                return
+            ttk.Label(user_param_frame, text="参数值").grid(row=0, column=0, columnspan=2, sticky=tk.W, padx=4, pady=(3, 6))
+            for row, (param_name, default) in enumerate(params.items(), start=1):
+                ttk.Label(user_param_frame, text=param_name).grid(row=row, column=0, sticky=tk.W, padx=4, pady=3)
+                var = tk.StringVar(value=str(default))
+                user_param_vars[param_name] = var
+                var.trace_add("write", update_user_result)
+                ttk.Entry(user_param_frame, textvariable=var, width=14).grid(row=row, column=1, sticky=tk.W, padx=4, pady=3)
+
+        def current_user_params() -> Dict[str, str]:
+            return {name: var.get() for name, var in user_param_vars.items()}
+
+        def clear_user_param_frame() -> None:
+            for child in user_param_frame.winfo_children():
+                child.destroy()
+            user_param_vars.clear()
+
+        def render_user_param_inputs(item: dict) -> None:
+            clear_user_param_frame()
+            params = item.get("params", {}) if item.get("mode") != "fixed" else {}
+            if not params:
+                ttk.Label(user_param_frame, text="固定时间动作无需填写参数。" if item.get("mode") == "fixed" else "当前公式没有参数。").grid(row=0, column=0, sticky=tk.W, padx=4, pady=4)
+                return
+            ttk.Label(user_param_frame, text="参数值").grid(row=0, column=0, columnspan=2, sticky=tk.W, padx=4, pady=(3, 6))
+            for row, (param_name, default) in enumerate(params.items(), start=1):
+                ttk.Label(user_param_frame, text=param_name).grid(row=row, column=0, sticky=tk.W, padx=4, pady=3)
+                var = tk.StringVar(value=str(default))
+                user_param_vars[param_name] = var
+                var.trace_add("write", update_user_result)
+                ttk.Entry(user_param_frame, textvariable=var, width=14).grid(row=row, column=1, sticky=tk.W, padx=4, pady=3)
+
+        def current_user_params() -> Dict[str, str]:
+            return {name: var.get() for name, var in user_param_vars.items()}
+
+        def clear_user_param_frame() -> None:
+            for child in user_param_frame.winfo_children():
+                child.destroy()
+            user_param_vars.clear()
+
+        def render_user_param_inputs(item: dict) -> None:
+            clear_user_param_frame()
+            params = item.get("params", {}) if item.get("mode") != "fixed" else {}
+            if not params:
+                ttk.Label(user_param_frame, text="固定时间动作无需填写参数。" if item.get("mode") == "fixed" else "当前公式没有参数。").grid(row=0, column=0, sticky=tk.W, padx=4, pady=4)
+                return
+            ttk.Label(user_param_frame, text="参数值").grid(row=0, column=0, columnspan=2, sticky=tk.W, padx=4, pady=(3, 6))
+            for row, (param_name, default) in enumerate(params.items(), start=1):
+                ttk.Label(user_param_frame, text=param_name).grid(row=row, column=0, sticky=tk.W, padx=4, pady=3)
+                var = tk.StringVar(value=str(default))
+                user_param_vars[param_name] = var
+                var.trace_add("write", update_user_result)
+                ttk.Entry(user_param_frame, textvariable=var, width=14).grid(row=row, column=1, sticky=tk.W, padx=4, pady=3)
+
+        def current_user_params() -> Dict[str, str]:
+            return {name: var.get() for name, var in user_param_vars.items()}
+
         def update_result(*_args) -> Optional[float]:
             try:
                 item = dict(selected_item())
