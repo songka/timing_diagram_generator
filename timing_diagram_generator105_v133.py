@@ -2121,7 +2121,7 @@ class TimingDiagramApp:
             return (
                 "可用公式说明：\n"
                 "1. 自定义公式可直接使用参数名，例如：距离 / 速度 + 延时。\n"
-                "2. 可用函数/常量：abs、min、max、round、ceil、floor、sqrt、pi。\n"
+                "2. 可用函数/常量：if(条件, 真值, 假值)、abs、min、max、round、ceil、floor、sqrt、pi。\n"
                 "3. 参数每行一个，格式：名称=默认值；参数名需与公式中的变量名一致。\n"
                 "4. 内置公式名：servo(伺服轴)、cylinder(气缸)、vacuum_on(真空吸附)、vacuum_off(破真空)。\n"
                 "5. 所有时间单位为秒(s)，计算结果必须大于 0。"
@@ -2130,36 +2130,49 @@ class TimingDiagramApp:
         def open_formula_editor() -> None:
             editor = tk.Toplevel(win)
             editor.title("公式编辑")
-            editor.geometry("680x560")
+            editor.geometry("920x540")
             editor.transient(win)
             editor.grab_set()
-            editor.columnconfigure(0, weight=1)
-            editor.rowconfigure(1, weight=1)
-            editor.rowconfigure(3, weight=1)
+            editor.columnconfigure(0, weight=3)
+            editor.columnconfigure(1, weight=2)
+            editor.rowconfigure(2, weight=1)
+            editor.rowconfigure(4, weight=1)
 
-            ttk.Label(editor, text="公式/内置公式名").grid(row=0, column=0, sticky=tk.W, padx=10, pady=(10, 4))
-            formula_text = tk.Text(editor, height=4, wrap=tk.WORD)
-            formula_text.grid(row=1, column=0, sticky=tk.NSEW, padx=10, pady=4)
+            button_row = ttk.Frame(editor)
+            button_row.grid(row=0, column=0, columnspan=2, sticky=tk.EW, padx=10, pady=(10, 4))
+
+            ttk.Label(editor, text="公式/内置公式名").grid(row=1, column=0, sticky=tk.W, padx=10, pady=(6, 4))
+            formula_text = tk.Text(editor, height=5, wrap=tk.WORD)
+            formula_text.grid(row=2, column=0, sticky=tk.NSEW, padx=10, pady=4)
             formula_text.insert("1.0", formula_var.get().strip())
 
-            ttk.Label(editor, text="参数定义（每行一个：名称=默认值）").grid(row=2, column=0, sticky=tk.W, padx=10, pady=(8, 4))
+            ttk.Label(editor, text="参数定义（每行一个：名称=默认值）").grid(row=3, column=0, sticky=tk.W, padx=10, pady=(8, 4))
             editor_param_text = tk.Text(editor, height=8, wrap=tk.NONE)
-            editor_param_text.grid(row=3, column=0, sticky=tk.NSEW, padx=10, pady=4)
+            editor_param_text.grid(row=4, column=0, sticky=tk.NSEW, padx=10, pady=(4, 10))
             editor_param_text.insert("1.0", "\n".join(f"{name}={value}" for name, value in current_params().items()))
 
-            help_box = tk.Text(editor, height=8, wrap=tk.WORD, background="#f8fafc")
-            help_box.grid(row=4, column=0, sticky=tk.EW, padx=10, pady=(8, 4))
+            help_frame = ttk.LabelFrame(editor, text="可用公式说明")
+            help_frame.grid(row=1, column=1, rowspan=4, sticky=tk.NSEW, padx=(4, 10), pady=(6, 10))
+            help_frame.rowconfigure(0, weight=1)
+            help_frame.columnconfigure(0, weight=1)
+            help_box = tk.Text(help_frame, wrap=tk.WORD, background="#f8fafc")
+            help_box.grid(row=0, column=0, sticky=tk.NSEW)
+            help_scroll = ttk.Scrollbar(help_frame, orient=tk.VERTICAL, command=help_box.yview)
+            help_scroll.grid(row=0, column=1, sticky=tk.NS)
+            help_box.configure(yscrollcommand=help_scroll.set)
             help_box.insert("1.0", formula_help_text())
             help_box.configure(state=tk.DISABLED)
 
             def save_formula_editor() -> None:
                 formula_var.set(formula_text.get("1.0", tk.END).strip())
                 render_param_inputs(parse_param_lines(editor_param_text.get("1.0", tk.END)), mode_to_value() == "expression")
-                update_result()
+                duration = update_result()
+                if duration is None:
+                    messagebox.showerror(self.ui("输入错误"), result_var.get(), parent=editor)
+                    return
+                save_common_action()
                 editor.destroy()
 
-            button_row = ttk.Frame(editor)
-            button_row.grid(row=5, column=0, sticky=tk.EW, padx=10, pady=10)
             ttk.Button(button_row, text="保存公式", command=save_formula_editor).pack(side=tk.LEFT, padx=2)
             ttk.Button(button_row, text=self.ui("关闭"), command=editor.destroy).pack(side=tk.RIGHT, padx=2)
 
@@ -2210,6 +2223,28 @@ class TimingDiagramApp:
             if mode_to_value() == "expression":
                 return text_params
             return text_params or {name: var.get() for name, var in param_vars.items()}
+
+        def clear_user_param_frame() -> None:
+            for child in user_param_frame.winfo_children():
+                child.destroy()
+            user_param_vars.clear()
+
+        def render_user_param_inputs(item: dict) -> None:
+            clear_user_param_frame()
+            params = item.get("params", {}) if item.get("mode") != "fixed" else {}
+            if not params:
+                ttk.Label(user_param_frame, text="固定时间动作无需填写参数。" if item.get("mode") == "fixed" else "当前公式没有参数。").grid(row=0, column=0, sticky=tk.W, padx=4, pady=4)
+                return
+            ttk.Label(user_param_frame, text="参数值").grid(row=0, column=0, columnspan=2, sticky=tk.W, padx=4, pady=(3, 6))
+            for row, (param_name, default) in enumerate(params.items(), start=1):
+                ttk.Label(user_param_frame, text=param_name).grid(row=row, column=0, sticky=tk.W, padx=4, pady=3)
+                var = tk.StringVar(value=str(default))
+                user_param_vars[param_name] = var
+                var.trace_add("write", update_user_result)
+                ttk.Entry(user_param_frame, textvariable=var, width=14).grid(row=row, column=1, sticky=tk.W, padx=4, pady=3)
+
+        def current_user_params() -> Dict[str, str]:
+            return {name: var.get() for name, var in user_param_vars.items()}
 
         def clear_user_param_frame() -> None:
             for child in user_param_frame.winfo_children():
